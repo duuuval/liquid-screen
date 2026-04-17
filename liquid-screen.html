@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="theme-color" content="#0a0a0f" />
+<title>Liquid Screen</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@200;300;400&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #0a0a0f;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    color: #fff;
+    touch-action: none;
+    overscroll-behavior: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /* Fake phone-home-screen background behind the canvas.
+     Soft blurred radial gradients mimicking wallpaper highlights.
+     Kept in CSS so we're not redrawing it every frame. */
+  #bg {
+    position: fixed; inset: 0;
+    background:
+      radial-gradient(ellipse at 20% 15%, rgba(90, 130, 200, 0.55), transparent 55%),
+      radial-gradient(ellipse at 80% 30%, rgba(180, 110, 190, 0.45), transparent 60%),
+      radial-gradient(ellipse at 50% 85%, rgba(60, 90, 160, 0.55), transparent 65%),
+      radial-gradient(ellipse at 10% 95%, rgba(40, 50, 90, 0.6), transparent 70%),
+      linear-gradient(165deg, #1a1730 0%, #0f0d1f 50%, #080814 100%);
+    filter: blur(1.5px) saturate(1.05);
+    z-index: 0;
+  }
+
+  canvas {
+    position: fixed; inset: 0;
+    width: 100%; height: 100%;
+    z-index: 1;
+    display: block;
+  }
+
+  /* HUD — minimal, measurement-instrument feel.
+     Top-right, slightly offset, low-contrast so droplets reading over it feels natural. */
+  #hud {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 18px);
+    right: 22px;
+    z-index: 2;
+    font-weight: 200;
+    font-size: 28px;
+    letter-spacing: 0.02em;
+    color: rgba(255, 255, 255, 0.88);
+    text-shadow: 0 1px 2px rgba(0,0,0,0.35);
+    pointer-events: none;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+  }
+  #hud .unit {
+    font-size: 14px;
+    font-weight: 300;
+    opacity: 0.65;
+    letter-spacing: 0.08em;
+  }
+
+  /* Overlays — start screen and game over screen share structure */
+  .overlay {
+    position: fixed; inset: 0;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 28px;
+    padding: 40px;
+    background: rgba(8, 8, 16, 0.72);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    text-align: center;
+    transition: opacity 0.35s ease;
+  }
+  .overlay.hidden { opacity: 0; pointer-events: none; }
+
+  .title {
+    font-weight: 200;
+    font-size: 38px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.95);
+  }
+  .title .accent {
+    color: #7ec9ff;
+    font-weight: 300;
+  }
+  .subtitle {
+    font-weight: 300;
+    font-size: 13px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.55);
+    max-width: 280px;
+    line-height: 1.7;
+  }
+
+  .btn {
+    font-family: inherit;
+    font-weight: 300;
+    font-size: 14px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.92);
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.35);
+    padding: 16px 32px;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .btn:active {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.7);
+    transform: scale(0.98);
+  }
+
+  /* Debug overlay — tap the dot in the bottom-left to toggle */
+  #debugDot {
+    position: fixed;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+    left: 12px;
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.25);
+    z-index: 3;
+    cursor: pointer;
+  }
+  #debugDot.active { background: rgba(126, 201, 255, 0.6); border-color: #7ec9ff; }
+  #debug {
+    position: fixed;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 50px);
+    left: 12px;
+    z-index: 3;
+    font-size: 10px;
+    line-height: 1.5;
+    font-weight: 300;
+    color: rgba(255,255,255,0.85);
+    background: rgba(0,0,0,0.55);
+    padding: 10px 12px;
+    border-radius: 4px;
+    pointer-events: none;
+    letter-spacing: 0.02em;
+    max-width: 200px;
+    font-variant-numeric: tabular-nums;
+    display: none;
+  }
+  #debug.on { display: block; }
+  #debug .k { color: rgba(255,255,255,0.45); }
+  #debug .ok { color: #8fe28f; }
+  #debug .bad { color: #ff9488; }
+
+  .final-score {
+    font-weight: 200;
+    font-size: 64px;
+    letter-spacing: 0.02em;
+    color: #7ec9ff;
+    font-variant-numeric: tabular-nums;
+  }
+  .final-score .unit {
+    font-size: 22px;
+    opacity: 0.6;
+    margin-left: 6px;
+  }
+  .label {
+    font-weight: 300;
+    font-size: 11px;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.5);
+  }
+
+  .err {
+    color: #ff9488;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    max-width: 280px;
+    line-height: 1.6;
+    margin-top: -12px;
+  }
+</style>
+</head>
+<body>
+
+<div id="bg"></div>
+<canvas id="game"></canvas>
+
+<div id="hud"><span id="score">50.0</span><span class="unit">µL</span></div>
+
+<!-- Debug overlay (tap dot to toggle) -->
+<div id="debugDot"></div>
+<div id="debug"></div>
+
+<!-- Start / calibrate screen -->
+<div id="start" class="overlay">
+  <div class="title">Liquid<span class="accent"> Screen</span></div>
+  <div class="subtitle">Tilt your phone to roll the droplet.<br>Absorb others to grow.<br>Don't slide off.</div>
+  <button id="startBtn" class="btn">Tap to Calibrate</button>
+  <div id="err" class="err" style="display:none"></div>
+</div>
+
+<!-- Game over screen -->
+<div id="over" class="overlay hidden">
+  <div class="label">Final Volume</div>
+  <div class="final-score"><span id="finalScore">50.0</span><span class="unit">µL</span></div>
+  <button id="replayBtn" class="btn">Replay</button>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ========================================================================
+  // SETUP & CONSTANTS
+  // ========================================================================
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d', { alpha: true });
+
+  const DPR = Math.min(window.devicePixelRatio || 1, 2); // cap at 2 for perf on high-dpi phones
+  let W = 0, H = 0;  // CSS pixels (logical)
+
+  function resize() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  resize();
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+
+  // ---- Tunables (gameplay feel lives here — all the knobs in one place)
+  const TUNE = {
+    // Physics
+    baseAccel: 1200,         // px/s^2 at full tilt, at starting mass
+    massAccelExp: 0.45,      // how much bigger = slower to accelerate. 0 = no effect, 1 = linear. 0.45 feels "heavy but not stuck"
+    friction: 0.985,         // per-frame velocity multiplier at 60fps (tiny amount of drag so full-release slows eventually)
+    tiltMaxDeg: 35,          // beyond this tilt, you're already at max accel — don't require wrist-breaking angles
+    tiltDeadzone: 1.5,       // degrees — ignore tiny jitter when phone is "flat"
+    // Starting state
+    startVolume: 50.0,       // µL
+    minVolume: 5,            // target drop min volume
+    maxVolume: 15,           // target drop max volume
+    targetCount: 10,         // on-screen static drops
+    // Visuals
+    radiusPerUL: 1.25,       // px per µL — r = radiusPerUL * cbrt(volume) * tuningConstant — actually, we use area scaling (see deriveRadius)
+    stretchMax: 0.28,        // max ellipse stretch factor at high speed (0.28 = 28% elongation)
+    stretchVelRef: 900,      // velocity (px/s) at which stretch approaches max
+    // Score animation
+    scoreLerpHz: 6,          // how fast the displayed score chases true score (higher = faster)
+  };
+
+  // Physical radius from volume. Treating the droplet top-down as a circle,
+  // volume µL ~ proportional to area (rough but reads correctly on screen).
+  // r = k * sqrt(volume). Tuned so 50µL -> ~38px radius, 200µL -> ~76px.
+  function deriveRadius(volume) {
+    return 5.4 * Math.sqrt(volume);
+  }
+
+  // ========================================================================
+  // STATE
+  // ========================================================================
+  const STATE = {
+    READY: 'ready',     // showing calibrate screen
+    PLAYING: 'playing',
+    OVER: 'over',
+  };
+  let state = STATE.READY;
+
+  // Orientation — raw from device
+  let rawBeta = 0;    // front-back tilt (x axis)  -180..180
+  let rawGamma = 0;   // left-right tilt (y axis)  -90..90
+  let haveOrientation = false;
+  let orientationEventCount = 0;   // for debug
+  let lastOrientationT = 0;        // for debug — detect stalled events
+
+  // Calibrated zero — set on tap
+  let calBeta = 0;
+  let calGamma = 0;
+
+  // Player droplet
+  const player = {
+    x: 0, y: 0,
+    vx: 0, vy: 0,
+    volume: TUNE.startVolume,
+    r: deriveRadius(TUNE.startVolume),
+  };
+
+  // Static target drops
+  const targets = []; // { x, y, volume, r, spawnT, seed }
+
+  // Score
+  let displayedScore = TUNE.startVolume;  // what's shown, chases trueScore
+  let trueScore = TUNE.startVolume;
+
+  // Visual tilt for static drops (lighting hint). Smoothed.
+  let lightTiltX = 0, lightTiltY = 0;
+
+  // Time
+  let lastT = performance.now();
+
+  // ========================================================================
+  // SPAWNING
+  // ========================================================================
+  function randomTargetVolume() {
+    return TUNE.minVolume + Math.random() * (TUNE.maxVolume - TUNE.minVolume);
+  }
+
+  function spawnTarget(avoidPlayer = true) {
+    const margin = 40;
+    let x, y, tries = 0;
+    const vol = randomTargetVolume();
+    const r = deriveRadius(vol);
+    do {
+      x = margin + Math.random() * (W - 2 * margin);
+      y = margin + Math.random() * (H - 2 * margin);
+      tries++;
+      if (tries > 20) break;
+    } while (
+      avoidPlayer &&
+      Math.hypot(x - player.x, y - player.y) < player.r + r + 60
+    );
+    targets.push({
+      x, y, volume: vol, r,
+      spawnT: performance.now(),       // for splat-in animation
+      seed: Math.random() * 6.28,      // per-drop variation in highlight shape
+    });
+  }
+
+  function resetGame() {
+    player.x = W / 2;
+    player.y = H / 2;
+    player.vx = 0;
+    player.vy = 0;
+    player.volume = TUNE.startVolume;
+    player.r = deriveRadius(player.volume);
+    targets.length = 0;
+    trueScore = TUNE.startVolume;
+    displayedScore = TUNE.startVolume;
+    updateScoreHUD(true);
+    for (let i = 0; i < TUNE.targetCount; i++) spawnTarget(true);
+  }
+
+  // ========================================================================
+  // ORIENTATION / PERMISSIONS
+  // ========================================================================
+  function onOrientation(e) {
+    if (e.beta == null || e.gamma == null) return;
+    rawBeta = e.beta;
+    rawGamma = e.gamma;
+    haveOrientation = true;
+    orientationEventCount++;
+    lastOrientationT = performance.now();
+  }
+
+  async function requestOrientationPermission() {
+    // iOS 13+ requires explicit permission via user gesture
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try {
+        const res = await DeviceOrientationEvent.requestPermission();
+        if (res !== 'granted') {
+          showErr('Motion access denied. Enable in Settings → Safari → Motion & Orientation.');
+          return false;
+        }
+      } catch (err) {
+        showErr('Could not request motion access. Try reloading.');
+        return false;
+      }
+    }
+    window.addEventListener('deviceorientation', onOrientation, true);
+    return true;
+  }
+
+  function showErr(msg) {
+    const el = document.getElementById('err');
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+
+  // ========================================================================
+  // INPUT → ACCEL
+  // ========================================================================
+  function currentTilt() {
+    // gamma = left-right (controls X), beta = front-back (controls Y)
+    let gx = rawGamma - calGamma;
+    let gy = rawBeta - calBeta;
+
+    // deadzone
+    if (Math.abs(gx) < TUNE.tiltDeadzone) gx = 0;
+    if (Math.abs(gy) < TUNE.tiltDeadzone) gy = 0;
+
+    // clamp to tiltMaxDeg so everything past that is just "max tilt"
+    const max = TUNE.tiltMaxDeg;
+    gx = Math.max(-max, Math.min(max, gx));
+    gy = Math.max(-max, Math.min(max, gy));
+
+    // normalize to -1..1
+    return { nx: gx / max, ny: gy / max };
+  }
+
+  // ========================================================================
+  // UPDATE
+  // ========================================================================
+  function update(dt) {
+    if (state !== STATE.PLAYING) return;
+
+    const { nx, ny } = currentTilt();
+
+    // Mass-scaled acceleration. Bigger droplets accelerate slower.
+    const massRatio = player.volume / TUNE.startVolume;
+    const accelScale = Math.pow(massRatio, -TUNE.massAccelExp);
+    const ax = nx * TUNE.baseAccel * accelScale;
+    const ay = ny * TUNE.baseAccel * accelScale;
+
+    player.vx += ax * dt;
+    player.vy += ay * dt;
+
+    // Friction (frame-rate independent approximation)
+    const fricFactor = Math.pow(TUNE.friction, dt * 60);
+    player.vx *= fricFactor;
+    player.vy *= fricFactor;
+
+    player.x += player.vx * dt;
+    player.y += player.vy * dt;
+
+    // Smooth the tilt used for lighting (so static drops highlight drift looks organic)
+    lightTiltX += (nx - lightTiltX) * Math.min(1, dt * 6);
+    lightTiltY += (ny - lightTiltY) * Math.min(1, dt * 6);
+
+    // Game over — entire drop off screen (soccer-line rule)
+    if (player.x + player.r < 0 ||
+        player.x - player.r > W ||
+        player.y + player.r < 0 ||
+        player.y - player.r > H) {
+      triggerGameOver();
+      return;
+    }
+
+    // Collisions with targets
+    for (let i = targets.length - 1; i >= 0; i--) {
+      const t = targets[i];
+      const dx = t.x - player.x;
+      const dy = t.y - player.y;
+      const d = Math.hypot(dx, dy);
+      // Absorb when the player's leading edge overlaps the target center-ish.
+      // Using r + r*0.5 feels like "the target gets sucked in" rather than merely grazed.
+      if (d < player.r + t.r * 0.35) {
+        player.volume += t.volume;
+        player.r = deriveRadius(player.volume);
+        trueScore = player.volume;
+        targets.splice(i, 1);
+        spawnTarget(true);
+      }
+    }
+
+    // Score display lerp
+    const lerpK = 1 - Math.exp(-TUNE.scoreLerpHz * dt);
+    displayedScore += (trueScore - displayedScore) * lerpK;
+    updateScoreHUD();
+  }
+
+  const scoreEl = document.getElementById('score');
+  function updateScoreHUD(force) {
+    scoreEl.textContent = displayedScore.toFixed(1);
+  }
+
+  // ========================================================================
+  // RENDER
+  // ========================================================================
+
+  // Water droplet renderer — the visual "hook" of the game.
+  //
+  // Look we're going for: a domed bead of water with:
+  //   - soft cyan-white highlight near the "up-light" side
+  //   - darker rim on the opposite side (implied refraction/density at edges)
+  //   - subtle shadow beneath (slight offset) suggesting 3D dome over surface
+  //   - gradient interior that's mostly transparent so background reads through
+  //
+  // We fake refraction by darkening the rim and brightening the highlight;
+  // real refraction would sample the BG through a normal map in a shader.
+  //
+  // stretch: 0..1, direction of stretch in radians. Applied as ellipse scale.
+  // lightDx, lightDy: unit vector pointing toward light (derived from tilt)
+  function drawDroplet(cx, cy, r, stretch, stretchAngle, lightDx, lightDy, alpha = 1, appear = 1) {
+    // appear: 0..1 splat-in scale
+    r *= appear;
+    if (r < 0.5) return;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(cx, cy);
+
+    // Stretch: elongate along motion direction, squash perpendicular.
+    // Conserve approximate area: if we stretch by (1+s) along axis,
+    // squash by 1/(1+s*0.6) perpendicular. (Not mathematically exact but reads right.)
+    if (stretch > 0.01) {
+      ctx.rotate(stretchAngle);
+      ctx.scale(1 + stretch, 1 / (1 + stretch * 0.6));
+    }
+
+    // --- 1. Soft cast shadow beneath the droplet (on the "screen" behind)
+    // Offset slightly down-right, feathered. This sells "3D bead on glass."
+    const shadowGrad = ctx.createRadialGradient(
+      r * 0.15, r * 0.35, 0,
+      r * 0.15, r * 0.35, r * 1.25
+    );
+    shadowGrad.addColorStop(0, 'rgba(0, 10, 25, 0.32)');
+    shadowGrad.addColorStop(0.5, 'rgba(0, 10, 25, 0.14)');
+    shadowGrad.addColorStop(1, 'rgba(0, 10, 25, 0)');
+    ctx.fillStyle = shadowGrad;
+    ctx.beginPath();
+    ctx.arc(r * 0.15, r * 0.35, r * 1.25, 0, Math.PI * 2);
+    ctx.fill();
+
+    // --- 2. Droplet body — slightly darker than bg toward the edges (rim)
+    //        mostly transparent in the center (refraction hint).
+    const bodyGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
+    bodyGrad.addColorStop(0, 'rgba(140, 200, 255, 0.05)');
+    bodyGrad.addColorStop(0.65, 'rgba(80, 140, 210, 0.08)');
+    bodyGrad.addColorStop(0.92, 'rgba(20, 40, 80, 0.42)');
+    bodyGrad.addColorStop(1, 'rgba(10, 20, 45, 0.62)');
+    ctx.fillStyle = bodyGrad;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // --- 3. Bright specular highlight — position driven by light vector
+    //        This is the thing that sells "3D dome."
+    const hlOffsetX = -lightDx * r * 0.42;
+    const hlOffsetY = -lightDy * r * 0.42;
+    const hlR = r * 0.55;
+    const hlGrad = ctx.createRadialGradient(
+      hlOffsetX, hlOffsetY, 0,
+      hlOffsetX, hlOffsetY, hlR
+    );
+    hlGrad.addColorStop(0, 'rgba(255, 255, 255, 0.85)');
+    hlGrad.addColorStop(0.35, 'rgba(220, 240, 255, 0.35)');
+    hlGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.fillStyle = hlGrad;
+    ctx.beginPath();
+    ctx.arc(hlOffsetX, hlOffsetY, hlR, 0, Math.PI * 2);
+    ctx.fill();
+
+    // --- 4. Tiny pinpoint specular — super bright, small, at the light-hit apex
+    const pinX = -lightDx * r * 0.55;
+    const pinY = -lightDy * r * 0.55;
+    const pinR = r * 0.12;
+    const pinGrad = ctx.createRadialGradient(pinX, pinY, 0, pinX, pinY, pinR);
+    pinGrad.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
+    pinGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.fillStyle = pinGrad;
+    ctx.beginPath();
+    ctx.arc(pinX, pinY, pinR, 0, Math.PI * 2);
+    ctx.fill();
+
+    // --- 5. Dark rim opposite the light (density cue)
+    ctx.strokeStyle = 'rgba(5, 15, 35, 0.35)';
+    ctx.lineWidth = Math.max(0.8, r * 0.04);
+    ctx.beginPath();
+    ctx.arc(0, 0, r - ctx.lineWidth * 0.5, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, W, H);
+
+    // Lighting direction — tilt makes "high side of phone" the light source.
+    // If you tilt right (nx > 0), the right side of each drop highlights.
+    // So light vector points toward +nx, -ny (flip y because gravity pulls down-screen).
+    const lightMag = Math.hypot(lightTiltX, lightTiltY);
+    let lightDx = 0, lightDy = -1; // default: light from top
+    if (lightMag > 0.02) {
+      // Blend between "top-lit" default and tilt-driven
+      const blend = Math.min(1, lightMag * 1.5);
+      const tx = lightTiltX, ty = -lightTiltY;
+      const tmag = Math.hypot(tx, ty) || 1;
+      lightDx = (tx / tmag) * blend + 0 * (1 - blend);
+      lightDy = (ty / tmag) * blend + (-1) * (1 - blend);
+      const m = Math.hypot(lightDx, lightDy) || 1;
+      lightDx /= m; lightDy /= m;
+    }
+
+    // Draw static targets
+    const now = performance.now();
+    for (const t of targets) {
+      const age = (now - t.spawnT) / 1000;
+      // Splat-in: overshoot scale, settle. Very fast (~200ms).
+      let appear;
+      if (age < 0.22) {
+        const k = age / 0.22;
+        // ease-out with slight overshoot
+        appear = 1 + 0.35 * Math.sin(k * Math.PI) - (1 - k) * 0.6;
+        appear = Math.max(0, appear);
+      } else {
+        appear = 1;
+      }
+      drawDroplet(t.x, t.y, t.r, 0, 0, lightDx, lightDy, 1, appear);
+    }
+
+    // Draw player droplet with stretch based on velocity
+    const speed = Math.hypot(player.vx, player.vy);
+    const stretch = Math.min(TUNE.stretchMax, (speed / TUNE.stretchVelRef) * TUNE.stretchMax * 1.4);
+    const stretchAngle = Math.atan2(player.vy, player.vx);
+    drawDroplet(player.x, player.y, player.r, stretch, stretchAngle, lightDx, lightDy, 1, 1);
+  }
+
+  // ========================================================================
+  // GAME OVER
+  // ========================================================================
+  const overOverlay = document.getElementById('over');
+  const finalScoreEl = document.getElementById('finalScore');
+
+  function triggerGameOver() {
+    state = STATE.OVER;
+    finalScoreEl.textContent = trueScore.toFixed(1);
+    overOverlay.classList.remove('hidden');
+  }
+
+  // ========================================================================
+  // DEBUG OVERLAY
+  // ========================================================================
+  const debugEl = document.getElementById('debug');
+  const debugDot = document.getElementById('debugDot');
+  let debugOn = false;
+  debugDot.addEventListener('click', (e) => {
+    e.stopPropagation();
+    debugOn = !debugOn;
+    debugEl.classList.toggle('on', debugOn);
+    debugDot.classList.toggle('active', debugOn);
+  });
+
+  let debugLastUpdate = 0;
+  function updateDebug(now) {
+    if (!debugOn) return;
+    if (now - debugLastUpdate < 100) return; // 10hz update — don't thrash the DOM
+    debugLastUpdate = now;
+
+    const eventsFresh = (now - lastOrientationT) < 500;
+    const eventStatus = haveOrientation
+      ? (eventsFresh ? '<span class="ok">LIVE</span>' : '<span class="bad">STALLED</span>')
+      : '<span class="bad">NONE</span>';
+
+    const { nx, ny } = currentTilt();
+    const speed = Math.hypot(player.vx, player.vy);
+
+    debugEl.innerHTML =
+      `<span class="k">orient:</span> ${eventStatus} <span class="k">(${orientationEventCount})</span><br>` +
+      `<span class="k">raw β γ:</span> ${rawBeta.toFixed(1)} ${rawGamma.toFixed(1)}<br>` +
+      `<span class="k">cal β γ:</span> ${calBeta.toFixed(1)} ${calGamma.toFixed(1)}<br>` +
+      `<span class="k">tilt n:</span> ${nx.toFixed(2)} ${ny.toFixed(2)}<br>` +
+      `<span class="k">pos:</span> ${player.x.toFixed(0)} ${player.y.toFixed(0)}<br>` +
+      `<span class="k">vel:</span> ${speed.toFixed(0)} px/s<br>` +
+      `<span class="k">vol:</span> ${player.volume.toFixed(1)} µL<br>` +
+      `<span class="k">state:</span> ${state}`;
+  }
+
+  // ========================================================================
+  // MAIN LOOP
+  // ========================================================================
+  function loop(t) {
+    const dtRaw = (t - lastT) / 1000;
+    lastT = t;
+    // Clamp dt to avoid huge jumps when tab was backgrounded
+    const dt = Math.min(0.05, Math.max(0, dtRaw));
+    update(dt);
+    render();
+    updateDebug(t);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame((t) => { lastT = t; loop(t); });
+
+  // ========================================================================
+  // UI WIRING
+  // ========================================================================
+  const startOverlay = document.getElementById('start');
+  const startBtn = document.getElementById('startBtn');
+  const replayBtn = document.getElementById('replayBtn');
+
+  async function beginPlay() {
+    const ok = await requestOrientationPermission();
+    if (!ok) return;
+    // Give one frame for a reading to come in, then calibrate
+    setTimeout(() => {
+      calBeta = rawBeta;
+      calGamma = rawGamma;
+      startOverlay.classList.add('hidden');
+      resetGame();
+      state = STATE.PLAYING;
+    }, 150);
+  }
+
+  startBtn.addEventListener('click', beginPlay);
+  replayBtn.addEventListener('click', () => {
+    // Re-calibrate on replay too — player may be holding phone differently
+    calBeta = rawBeta;
+    calGamma = rawGamma;
+    overOverlay.classList.add('hidden');
+    resetGame();
+    state = STATE.PLAYING;
+  });
+
+  // Dev fallback — desktop testing without a gyroscope (arrow keys / pointer)
+  // Only active if no orientation events come in within 2 seconds of play.
+  let devFallback = false;
+  setTimeout(() => {
+    if (!haveOrientation && state !== STATE.READY) {
+      enableDevFallback();
+    }
+  }, 2000);
+  function enableDevFallback() {
+    devFallback = true;
+    const keys = {};
+    window.addEventListener('keydown', e => { keys[e.key] = true; });
+    window.addEventListener('keyup', e => { keys[e.key] = false; });
+    // Synthesize orientation from arrow keys
+    setInterval(() => {
+      if (!devFallback) return;
+      let gx = 0, gy = 0;
+      if (keys.ArrowLeft) gx -= 25;
+      if (keys.ArrowRight) gx += 25;
+      if (keys.ArrowUp) gy -= 25;
+      if (keys.ArrowDown) gy += 25;
+      rawGamma = gx;
+      rawBeta = gy;
+    }, 16);
+  }
+
+  // Prevent pull-to-refresh and scroll bounce
+  document.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+
+})();
+</script>
+</body>
+</html>
