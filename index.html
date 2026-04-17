@@ -25,20 +25,9 @@
     -webkit-user-select: none;
   }
 
-  /* Fake phone-home-screen background behind the canvas.
-     Soft blurred radial gradients mimicking wallpaper highlights.
-     Kept in CSS so we're not redrawing it every frame. */
-  #bg {
-    position: fixed; inset: 0;
-    background:
-      radial-gradient(ellipse at 20% 15%, rgba(90, 130, 200, 0.55), transparent 55%),
-      radial-gradient(ellipse at 80% 30%, rgba(180, 110, 190, 0.45), transparent 60%),
-      radial-gradient(ellipse at 50% 85%, rgba(60, 90, 160, 0.55), transparent 65%),
-      radial-gradient(ellipse at 10% 95%, rgba(40, 50, 90, 0.6), transparent 70%),
-      linear-gradient(165deg, #1a1730 0%, #0f0d1f 50%, #080814 100%);
-    filter: blur(1.5px) saturate(1.05);
-    z-index: 0;
-  }
+  /* Background is now drawn onto the canvas (behind the drops) so we can
+     sample it for the refraction effect inside each droplet. */
+  html, body { background: #060811; }
 
   canvas {
     position: fixed; inset: 0;
@@ -201,7 +190,6 @@
 </head>
 <body>
 
-<div id="bg"></div>
 <canvas id="game"></canvas>
 
 <div id="hud"><span id="score">50.0</span><span class="unit">µL</span></div>
@@ -306,17 +294,19 @@
     vx: 0, vy: 0,
     volume: TUNE.startVolume,
     r: deriveRadius(TUNE.startVolume),
+    sig: null,   // shape signature, set in resetGame
   };
 
+  // Shape-noise amplitudes (fraction of radius).
+  const PLAYER_SHAPE_AMP = 0.09;   // ~9% perturbation — lumpy but still clearly "me"
+  const TARGET_SHAPE_AMP = 0.14;   // ~14% — more varied, reads as real beads
+
   // Static target drops
-  const targets = []; // { x, y, volume, r, spawnT, seed }
+  const targets = []; // { x, y, volume, r, spawnT, sig }
 
   // Score
   let displayedScore = TUNE.startVolume;  // what's shown, chases trueScore
   let trueScore = TUNE.startVolume;
-
-  // Visual tilt for static drops (lighting hint). Smoothed.
-  let lightTiltX = 0, lightTiltY = 0;
 
   // Time
   let lastT = performance.now();
@@ -345,7 +335,7 @@
     targets.push({
       x, y, volume: vol, r,
       spawnT: performance.now(),       // for splat-in animation
-      seed: Math.random() * 6.28,      // per-drop variation in highlight shape
+      sig: makeShapeSig(TARGET_SHAPE_AMP),
     });
   }
 
@@ -356,6 +346,7 @@
     player.vy = 0;
     player.volume = TUNE.startVolume;
     player.r = deriveRadius(player.volume);
+    player.sig = makeShapeSig(PLAYER_SHAPE_AMP);
     targets.length = 0;
     trueScore = TUNE.startVolume;
     displayedScore = TUNE.startVolume;
@@ -446,10 +437,6 @@
     player.x += player.vx * dt;
     player.y += player.vy * dt;
 
-    // Smooth the tilt used for lighting (so static drops highlight drift looks organic)
-    lightTiltX += (nx - lightTiltX) * Math.min(1, dt * 6);
-    lightTiltY += (ny - lightTiltY) * Math.min(1, dt * 6);
-
     // Game over — entire drop off screen (soccer-line rule)
     if (player.x + player.r < 0 ||
         player.x - player.r > W ||
@@ -490,143 +477,259 @@
   // ========================================================================
   // RENDER
   // ========================================================================
+  //
+  // Model: drops are DARK LENSES on a live animated background, with bright
+  // rim arcs on the upper edge (ambient top-light grazing the curve) and a
+  // small randomized pinpoint specular. Each drop refracts the background
+  // by sampling it, magnified and offset, clipped to the drop's shape.
+  //
+  // Layers per drop (bottom to top):
+  //   1. Soft shadow underneath (drop sits in a wet-ring halo)
+  //   2. Refraction: magnified/offset background sample, clipped to shape
+  //   3. Body tint: darkens toward rim, plus inner lower-shadow for dome feel
+  //   4. Bright rim arc on upper edge (linear-gradient-masked stroke)
+  //   5. Tiny pinpoint specular at a per-drop randomized position
 
-  // Water droplet renderer — the visual "hook" of the game.
-  //
-  // Look we're going for: a domed bead of water with:
-  //   - soft cyan-white highlight near the "up-light" side
-  //   - darker rim on the opposite side (implied refraction/density at edges)
-  //   - subtle shadow beneath (slight offset) suggesting 3D dome over surface
-  //   - gradient interior that's mostly transparent so background reads through
-  //
-  // We fake refraction by darkening the rim and brightening the highlight;
-  // real refraction would sample the BG through a normal map in a shader.
-  //
-  // stretch: 0..1, direction of stretch in radians. Applied as ellipse scale.
-  // lightDx, lightDy: unit vector pointing toward light (derived from tilt)
-  function drawDroplet(cx, cy, r, stretch, stretchAngle, lightDx, lightDy, alpha = 1, appear = 1) {
-    // appear: 0..1 splat-in scale
+  // ---------- Animated background ----------
+  // Drawn live every frame to a dedicated offscreen canvas, which the drops
+  // then sample for refraction. Drawing to offscreen first (instead of the
+  // main canvas directly) lets us blit it once as the main background AND
+  // sample it per drop without re-generating gradients each time.
+  const bgCanvas = document.createElement('canvas');
+  const bgCtx = bgCanvas.getContext('2d');
+  // Render background at 0.6x resolution — imperceptible on a phone display,
+  // saves significant fill time when we have 10+ drops sampling it.
+  const BG_RES = 0.6;
+
+  function resizeBg() {
+    bgCanvas.width = Math.floor(W * BG_RES * DPR);
+    bgCanvas.height = Math.floor(H * BG_RES * DPR);
+  }
+  resizeBg();
+  window.addEventListener('resize', () => setTimeout(resizeBg, 50));
+
+  // Four slow-drifting colored blobs. Hues chosen to feel like phone-screen
+  // wallpaper reflections — blues, violets, a touch of teal.
+  const bgBlobs = [
+    { hue: 215, sat: 60, lig: 34, bx: 0.22, by: 0.18, ax: 0.10, ay: 0.07, sp: 0.05, ph: 0.0 },
+    { hue: 268, sat: 50, lig: 28, bx: 0.78, by: 0.30, ax: 0.12, ay: 0.09, sp: 0.06, ph: 1.7 },
+    { hue: 195, sat: 65, lig: 32, bx: 0.50, by: 0.82, ax: 0.14, ay: 0.07, sp: 0.04, ph: 3.1 },
+    { hue: 290, sat: 45, lig: 24, bx: 0.15, by: 0.92, ax: 0.09, ay: 0.06, sp: 0.07, ph: 4.4 },
+  ];
+
+  function renderBackground(tSec) {
+    const bw = bgCanvas.width;
+    const bh = bgCanvas.height;
+
+    // Inky base. The reference image has this deep near-black depth.
+    bgCtx.fillStyle = '#050810';
+    bgCtx.fillRect(0, 0, bw, bh);
+
+    // Additive blending on the blobs so overlaps build into brighter zones.
+    bgCtx.globalCompositeOperation = 'lighter';
+    for (const b of bgBlobs) {
+      const t = tSec * b.sp + b.ph;
+      const cx = (b.bx + Math.sin(t) * b.ax) * bw;
+      const cy = (b.by + Math.cos(t * 0.8) * b.ay) * bh;
+      const r = Math.max(bw, bh) * 0.55;
+      const g = bgCtx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      g.addColorStop(0, `hsla(${b.hue}, ${b.sat}%, ${b.lig}%, 0.9)`);
+      g.addColorStop(0.5, `hsla(${b.hue}, ${b.sat}%, ${b.lig * 0.5}%, 0.4)`);
+      g.addColorStop(1, `hsla(${b.hue}, ${b.sat}%, ${b.lig * 0.2}%, 0)`);
+      bgCtx.fillStyle = g;
+      bgCtx.fillRect(0, 0, bw, bh);
+    }
+    bgCtx.globalCompositeOperation = 'source-over';
+
+    // Vignette — darker edges anchor the scene and make edge-drops feel heavier.
+    const vign = bgCtx.createRadialGradient(bw * 0.5, bh * 0.5, bw * 0.3, bw * 0.5, bh * 0.5, Math.max(bw, bh) * 0.75);
+    vign.addColorStop(0, 'rgba(0,0,0,0)');
+    vign.addColorStop(1, 'rgba(0,0,0,0.5)');
+    bgCtx.fillStyle = vign;
+    bgCtx.fillRect(0, 0, bw, bh);
+  }
+
+  // ---------- Drop shape perturbation ----------
+  // r(θ) = r0 * (1 + Σ aₙ·cos(kₙθ + pₙ)) for harmonics k = 3, 4, 5.
+  // 3/4/5 give lumpy but convex-enough shapes (higher harmonics start
+  // producing concavity which reads as "squid," not "water").
+  function buildDropPath(r, sig) {
+    const path = new Path2D();
+    // Segment count scales with radius but capped — a 120px drop doesn't
+    // need 200 segments to look smooth.
+    const N = Math.min(64, Math.max(28, Math.floor(r * 0.7)));
+    for (let i = 0; i <= N; i++) {
+      const theta = (i / N) * Math.PI * 2;
+      const perturb =
+        sig.a1 * Math.cos(3 * theta + sig.p1) +
+        sig.a2 * Math.cos(4 * theta + sig.p2) +
+        sig.a3 * Math.cos(5 * theta + sig.p3);
+      const rr = r * (1 + perturb);
+      const x = Math.cos(theta) * rr;
+      const y = Math.sin(theta) * rr;
+      if (i === 0) path.moveTo(x, y);
+      else path.lineTo(x, y);
+    }
+    path.closePath();
+    return path;
+  }
+
+  // amplitude = total max perturbation as a fraction of radius.
+  function makeShapeSig(amplitude) {
+    return {
+      a1: (0.5 + Math.random() * 0.5) * amplitude * 0.55,
+      a2: (0.5 + Math.random() * 0.5) * amplitude * 0.30,
+      a3: (0.5 + Math.random() * 0.5) * amplitude * 0.15,
+      p1: Math.random() * Math.PI * 2,
+      p2: Math.random() * Math.PI * 2,
+      p3: Math.random() * Math.PI * 2,
+      // Per-drop pinpoint specular position, in drop-local normalized coords.
+      // Biased to upper half so it feels like ambient top-light.
+      specX: (Math.random() - 0.5) * 0.9,
+      specY: -0.30 - Math.random() * 0.45,
+    };
+  }
+
+  // ---------- Drop renderer ----------
+  // cx, cy: center in main-canvas CSS pixels
+  // r: radius in CSS pixels
+  // stretch: 0..~0.3 ellipse factor
+  // stretchAngle: rotation for the stretch axis
+  // sig: shape signature object from makeShapeSig
+  // appear: 0..1 splat-in scale
+  function drawDroplet(cx, cy, r, stretch, stretchAngle, sig, appear) {
     r *= appear;
     if (r < 0.5) return;
 
+    // --- 1. Shadow underneath (drawn in world coords, NOT under stretch/rotate,
+    //        because the shadow is on the surface below, not on the drop).
     ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.translate(cx, cy);
+    const shR = r * 1.25;
+    const shadowGrad = ctx.createRadialGradient(cx, cy + r * 0.08, r * 0.6, cx, cy + r * 0.08, shR);
+    shadowGrad.addColorStop(0, 'rgba(0, 3, 10, 0.42)');
+    shadowGrad.addColorStop(0.7, 'rgba(0, 3, 10, 0.15)');
+    shadowGrad.addColorStop(1, 'rgba(0, 3, 10, 0)');
+    ctx.fillStyle = shadowGrad;
+    ctx.beginPath();
+    ctx.arc(cx, cy + r * 0.08, shR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
 
-    // Stretch: elongate along motion direction, squash perpendicular.
-    // Conserve approximate area: if we stretch by (1+s) along axis,
-    // squash by 1/(1+s*0.6) perpendicular. (Not mathematically exact but reads right.)
+    // Now enter drop-local space for the drop itself.
+    ctx.save();
+    ctx.translate(cx, cy);
     if (stretch > 0.01) {
       ctx.rotate(stretchAngle);
       ctx.scale(1 + stretch, 1 / (1 + stretch * 0.6));
     }
 
-    // --- 1. Soft cast shadow beneath the droplet (on the "screen" behind)
-    // Offset slightly down-right, feathered. This sells "3D bead on glass."
-    const shadowGrad = ctx.createRadialGradient(
-      r * 0.15, r * 0.35, 0,
-      r * 0.15, r * 0.35, r * 1.25
-    );
-    shadowGrad.addColorStop(0, 'rgba(0, 10, 25, 0.32)');
-    shadowGrad.addColorStop(0.5, 'rgba(0, 10, 25, 0.14)');
-    shadowGrad.addColorStop(1, 'rgba(0, 10, 25, 0)');
-    ctx.fillStyle = shadowGrad;
-    ctx.beginPath();
-    ctx.arc(r * 0.15, r * 0.35, r * 1.25, 0, Math.PI * 2);
-    ctx.fill();
+    const path = buildDropPath(r, sig);
 
-    // --- 2. Droplet body — slightly darker than bg toward the edges (rim)
-    //        mostly transparent in the center (refraction hint).
-    const bodyGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
-    bodyGrad.addColorStop(0, 'rgba(140, 200, 255, 0.05)');
-    bodyGrad.addColorStop(0.65, 'rgba(80, 140, 210, 0.08)');
-    bodyGrad.addColorStop(0.92, 'rgba(20, 40, 80, 0.42)');
-    bodyGrad.addColorStop(1, 'rgba(10, 20, 45, 0.62)');
+    // --- 2. Refraction. Clip to drop shape, blit background shifted.
+    ctx.save();
+    ctx.clip(path);
+
+    // We want to sample the background at (cx, cy) magnified by ~1.18x,
+    // with a slight offset *toward screen center* (edge drops appear to
+    // warp more). Because we're in a translated+scaled local context,
+    // we draw the full bg image offset by (-cx, -cy) and let the magnify
+    // factor do the rest.
+    const MAG = 1.18;
+    // Offset the sample toward screen center. Small absolute shift.
+    const ncx = cx / W - 0.5;   // -0.5..0.5
+    const ncy = cy / H - 0.5;
+    const offX = -ncx * r * 0.55;
+    const offY = -ncy * r * 0.55;
+
+    // Destination rect in local coords: centered on origin, scaled to MAG×W/H.
+    const drawW = W * MAG;
+    const drawH = H * MAG;
+    // Position so the point corresponding to (cx,cy) on bg lands at origin,
+    // then add offset.
+    const dx = -cx * MAG + offX;
+    const dy = -cy * MAG + offY;
+
+    ctx.drawImage(bgCanvas, dx, dy, drawW, drawH);
+
+    // --- 3. Body tint — dark toward edges, plus lower inner shadow.
+    const bodyGrad = ctx.createRadialGradient(0, 0, r * 0.15, 0, 0, r);
+    bodyGrad.addColorStop(0, 'rgba(5, 10, 25, 0)');
+    bodyGrad.addColorStop(0.55, 'rgba(4, 8, 22, 0.18)');
+    bodyGrad.addColorStop(0.85, 'rgba(2, 5, 15, 0.48)');
+    bodyGrad.addColorStop(1, 'rgba(0, 1, 8, 0.72)');
     ctx.fillStyle = bodyGrad;
-    ctx.beginPath();
-    ctx.arc(0, 0, r, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillRect(-r * 1.35, -r * 1.35, r * 2.7, r * 2.7);
 
-    // --- 3. Bright specular highlight — position driven by light vector
-    //        This is the thing that sells "3D dome."
-    const hlOffsetX = -lightDx * r * 0.42;
-    const hlOffsetY = -lightDy * r * 0.42;
-    const hlR = r * 0.55;
-    const hlGrad = ctx.createRadialGradient(
-      hlOffsetX, hlOffsetY, 0,
-      hlOffsetX, hlOffsetY, hlR
-    );
-    hlGrad.addColorStop(0, 'rgba(255, 255, 255, 0.85)');
-    hlGrad.addColorStop(0.35, 'rgba(220, 240, 255, 0.35)');
-    hlGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-    ctx.fillStyle = hlGrad;
-    ctx.beginPath();
-    ctx.arc(hlOffsetX, hlOffsetY, hlR, 0, Math.PI * 2);
-    ctx.fill();
+    // Inner lower shadow — dark pool at the bottom of the drop (dome cue).
+    const innerShadow = ctx.createRadialGradient(0, r * 0.45, 0, 0, r * 0.45, r * 0.85);
+    innerShadow.addColorStop(0, 'rgba(0, 2, 8, 0.32)');
+    innerShadow.addColorStop(1, 'rgba(0, 2, 8, 0)');
+    ctx.fillStyle = innerShadow;
+    ctx.fillRect(-r * 1.35, -r * 1.35, r * 2.7, r * 2.7);
 
-    // --- 4. Tiny pinpoint specular — super bright, small, at the light-hit apex
-    const pinX = -lightDx * r * 0.55;
-    const pinY = -lightDy * r * 0.55;
-    const pinR = r * 0.12;
+    ctx.restore(); // end clip
+
+    // --- 4. Upper rim arc. Strokes the full drop path with a strokeStyle
+    //        that's a vertical linear gradient — bright at top, fading to
+    //        transparent past the equator. This gives us the curved arc
+    //        shape that follows the perturbed drop outline.
+    const rimGrad = ctx.createLinearGradient(0, -r, 0, r * 0.15);
+    rimGrad.addColorStop(0, 'rgba(220, 235, 255, 0.88)');
+    rimGrad.addColorStop(0.35, 'rgba(180, 210, 245, 0.42)');
+    rimGrad.addColorStop(0.75, 'rgba(90, 120, 170, 0.06)');
+    rimGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.strokeStyle = rimGrad;
+    ctx.lineWidth = Math.max(1.0, r * 0.055);
+    ctx.lineJoin = 'round';
+    ctx.stroke(path);
+
+    // --- 5. Pinpoint specular. Small, sharp, at the drop's own random spot.
+    const pinX = sig.specX * r;
+    const pinY = sig.specY * r;
+    const pinR = r * 0.10;
     const pinGrad = ctx.createRadialGradient(pinX, pinY, 0, pinX, pinY, pinR);
-    pinGrad.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
+    pinGrad.addColorStop(0, 'rgba(255, 255, 255, 0.9)');
+    pinGrad.addColorStop(0.5, 'rgba(240, 250, 255, 0.35)');
     pinGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
     ctx.fillStyle = pinGrad;
     ctx.beginPath();
     ctx.arc(pinX, pinY, pinR, 0, Math.PI * 2);
     ctx.fill();
 
-    // --- 5. Dark rim opposite the light (density cue)
-    ctx.strokeStyle = 'rgba(5, 15, 35, 0.35)';
-    ctx.lineWidth = Math.max(0.8, r * 0.04);
-    ctx.beginPath();
-    ctx.arc(0, 0, r - ctx.lineWidth * 0.5, 0, Math.PI * 2);
-    ctx.stroke();
-
     ctx.restore();
   }
 
+  // ---------- Frame ----------
   function render() {
-    ctx.clearRect(0, 0, W, H);
+    const tSec = performance.now() / 1000;
 
-    // Lighting direction — tilt makes "high side of phone" the light source.
-    // If you tilt right (nx > 0), the right side of each drop highlights.
-    // So light vector points toward +nx, -ny (flip y because gravity pulls down-screen).
-    const lightMag = Math.hypot(lightTiltX, lightTiltY);
-    let lightDx = 0, lightDy = -1; // default: light from top
-    if (lightMag > 0.02) {
-      // Blend between "top-lit" default and tilt-driven
-      const blend = Math.min(1, lightMag * 1.5);
-      const tx = lightTiltX, ty = -lightTiltY;
-      const tmag = Math.hypot(tx, ty) || 1;
-      lightDx = (tx / tmag) * blend + 0 * (1 - blend);
-      lightDy = (ty / tmag) * blend + (-1) * (1 - blend);
-      const m = Math.hypot(lightDx, lightDy) || 1;
-      lightDx /= m; lightDy /= m;
-    }
+    // 1. Regenerate background each frame (live, not cached).
+    renderBackground(tSec);
 
-    // Draw static targets
+    // 2. Blit bg to main canvas as the scene backdrop.
+    ctx.drawImage(bgCanvas, 0, 0, W, H);
+
+    // 3. Draw targets with splat-in animation.
     const now = performance.now();
     for (const t of targets) {
       const age = (now - t.spawnT) / 1000;
-      // Splat-in: overshoot scale, settle. Very fast (~200ms).
       let appear;
       if (age < 0.22) {
         const k = age / 0.22;
-        // ease-out with slight overshoot
+        // Overshoot-and-settle
         appear = 1 + 0.35 * Math.sin(k * Math.PI) - (1 - k) * 0.6;
         appear = Math.max(0, appear);
       } else {
         appear = 1;
       }
-      drawDroplet(t.x, t.y, t.r, 0, 0, lightDx, lightDy, 1, appear);
+      drawDroplet(t.x, t.y, t.r, 0, 0, t.sig, appear);
     }
 
-    // Draw player droplet with stretch based on velocity
+    // 4. Draw player drop with velocity-based stretch.
     const speed = Math.hypot(player.vx, player.vy);
     const stretch = Math.min(TUNE.stretchMax, (speed / TUNE.stretchVelRef) * TUNE.stretchMax * 1.4);
     const stretchAngle = Math.atan2(player.vy, player.vx);
-    drawDroplet(player.x, player.y, player.r, stretch, stretchAngle, lightDx, lightDy, 1, 1);
+    drawDroplet(player.x, player.y, player.r, stretch, stretchAngle, player.sig, 1);
   }
 
   // ========================================================================
