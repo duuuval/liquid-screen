@@ -288,18 +288,18 @@
   let calBeta = 0;
   let calGamma = 0;
 
+  // Shape-noise amplitudes (fraction of radius).
+  const PLAYER_SHAPE_AMP = 0.09;   // ~9% perturbation — lumpy but still clearly "me"
+  const TARGET_SHAPE_AMP = 0.14;   // ~14% — more varied, reads as real beads
+
   // Player droplet
   const player = {
     x: 0, y: 0,
     vx: 0, vy: 0,
     volume: TUNE.startVolume,
     r: deriveRadius(TUNE.startVolume),
-    sig: null,   // shape signature, set in resetGame
+    sig: null,   // populated below once makeShapeSig is defined — see init
   };
-
-  // Shape-noise amplitudes (fraction of radius).
-  const PLAYER_SHAPE_AMP = 0.09;   // ~9% perturbation — lumpy but still clearly "me"
-  const TARGET_SHAPE_AMP = 0.14;   // ~14% — more varied, reads as real beads
 
   // Static target drops
   const targets = []; // { x, y, volume, r, spawnT, sig }
@@ -708,6 +708,10 @@
 
     // 2. Blit bg to main canvas as the scene backdrop.
     ctx.drawImage(bgCanvas, 0, 0, W, H);
+
+    // Don't draw drops until the game has been started at least once.
+    // Before resetGame() runs, player.sig is null and targets is empty.
+    if (state === STATE.READY) return;
 
     // 3. Draw targets with splat-in animation.
     const now = performance.now();
