@@ -158,6 +158,114 @@
   #debug .ok { color: #8fe28f; }
   #debug .bad { color: #ff9488; }
 
+/* Tuning panel — appears with debug. Right side of screen to avoid debug readout. */
+  #tuning {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 60px);
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 50px);
+    right: 12px;
+    width: 200px;
+    z-index: 3;
+    background: rgba(0,0,0,0.7);
+    border-radius: 4px;
+    padding: 10px 12px;
+    overflow-y: auto;
+    font-size: 10px;
+    color: rgba(255,255,255,0.9);
+    display: none;
+    -webkit-overflow-scrolling: touch;
+    pointer-events: auto;
+  }
+  #tuning.on { display: block; }
+  #tuning .group {
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+  }
+  #tuning .group:last-child { border-bottom: none; }
+  #tuning .gLabel {
+    font-weight: 400;
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: rgba(126, 201, 255, 0.8);
+    margin-bottom: 6px;
+  }
+  #tuning .row {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 8px;
+  }
+  #tuning .rowTop {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 2px;
+  }
+  #tuning .pName {
+    color: rgba(255,255,255,0.7);
+    font-size: 10px;
+  }
+  #tuning .pVal {
+    font-variant-numeric: tabular-nums;
+    color: #fff;
+    font-size: 10px;
+  }
+  #tuning input[type="range"] {
+    width: 100%;
+    height: 18px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    margin: 0;
+    padding: 0;
+  }
+  #tuning input[type="range"]::-webkit-slider-runnable-track {
+    height: 3px; background: rgba(255,255,255,0.2); border-radius: 2px;
+  }
+  #tuning input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: #7ec9ff; margin-top: -7px;
+  }
+  #tuning input[type="range"]::-moz-range-track {
+    height: 3px; background: rgba(255,255,255,0.2); border-radius: 2px;
+  }
+  #tuning input[type="range"]::-moz-range-thumb {
+    width: 16px; height: 16px; border-radius: 50%;
+    background: #7ec9ff; border: none;
+  }
+  #tuning .resetBtn {
+    margin-left: 6px;
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.3);
+    color: rgba(255,255,255,0.8);
+    border-radius: 3px;
+    padding: 0 5px;
+    font-size: 9px;
+    line-height: 14px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  #tuning .resetBtn:active {
+    background: rgba(255,255,255,0.15);
+  }
+  #tuning .resetAll {
+    width: 100%;
+    margin-top: 4px;
+    padding: 6px 0;
+    background: transparent;
+    border: 1px solid rgba(255, 148, 136, 0.5);
+    color: rgba(255, 148, 136, 0.9);
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  #tuning .resetAll:active { background: rgba(255, 148, 136, 0.1); }
+
   .final-score {
     font-weight: 200;
     font-size: 64px;
@@ -190,6 +298,17 @@
 </head>
 <body>
 
+<!-- Global error banner — appears if anything in the script crashes.
+     Visible on top of everything so mobile users can see errors without devtools. -->
+<div id="errBanner" style="
+  position:fixed; top:0; left:0; right:0; z-index:9999;
+  background:#4a0000; color:#ffd0d0;
+  font-family:ui-monospace,monospace; font-size:11px; line-height:1.4;
+  padding:10px 14px; max-height:50vh; overflow:auto;
+  border-bottom:2px solid #ff4444;
+  display:none; white-space:pre-wrap; word-break:break-word;">
+</div>
+
 <canvas id="game"></canvas>
 
 <div id="hud"><span id="score">50.0</span><span class="unit">µL</span></div>
@@ -197,6 +316,7 @@
 <!-- Debug overlay (tap dot to toggle) -->
 <div id="debugDot"></div>
 <div id="debug"></div>
+<div id="tuning"></div>
 
 <!-- Start / calibrate screen -->
 <div id="start" class="overlay">
@@ -214,8 +334,40 @@
 </div>
 
 <script>
+// -------- Global error surface (installed first, outside IIFE) --------
+// Any JS error anywhere in this file will show up in the red banner at
+// the top of the screen. No console required.
+(function installErrorSurface() {
+  const banner = document.getElementById('errBanner');
+  function show(msg) {
+    if (!banner) return;
+    banner.style.display = 'block';
+    // Append rather than replace, so multiple errors stack
+    const entry = document.createElement('div');
+    entry.style.marginBottom = '6px';
+    entry.textContent = msg;
+    banner.appendChild(entry);
+  }
+  window.addEventListener('error', (e) => {
+    const where = e.filename ? ` @ ${e.filename}:${e.lineno}:${e.colno}` : '';
+    show(`❌ ${e.message}${where}\n${e.error && e.error.stack ? e.error.stack : ''}`);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    show(`❌ unhandled promise: ${e.reason && e.reason.message ? e.reason.message : e.reason}`);
+  });
+  // Expose for manual logging from inside the IIFE
+  window.__err = show;
+  // Startup heartbeat — confirms the script reached this point at all
+  window.__logStartup = (step) => {
+    // Uncomment next line to trace boot sequence:
+    // show(`▸ ${step}`);
+  };
+})();
+</script>
+<script>
 (() => {
   'use strict';
+  window.__logStartup && window.__logStartup('IIFE start');
 
   // ========================================================================
   // SETUP & CONSTANTS
@@ -271,9 +423,12 @@
     //   - Quadratic in proximity so it ramps hard near the edge.
     suctionReach: 180,       // px from edge where suction begins (at start size).
                              // Scales up with drop radius so bigger drops feel it earlier.
-    suctionReachPerR: 1.4,   // reach grows with radius: effectiveReach = suctionReach + r * this
-    suctionStrength: 900,    // px/s^2 max acceleration at edge and high mass
-    suctionMassExp: 1.1,     // how hard mass amplifies suction. 1.0 = linear, 1.5 = punishing
+    suctionReachPerR: 0.8,   // reach grows with radius: effectiveReach = suctionReach + r * this
+    suctionStrength: 380,    // peak px/s^2 at 50µL against an edge. Calibrated so medium
+                             // sizes feel safe and 300µL is the effective ceiling.
+    suctionMassExp: 1.35,    // 1.35 produces a "safe-then-brutal" curve: weak at low mass,
+                             // accelerating fast past 200µL. Don't exceed ~1.5 or growth
+                             // becomes a hard wall rather than a curve.
     // Score animation
     scoreLerpHz: 6,          // how fast the displayed score chases true score (higher = faster)
   };
@@ -555,7 +710,7 @@
       return;
     }
 
-        // Collisions with targets
+    // Collisions with targets
     for (let i = targets.length - 1; i >= 0; i--) {
       const t = targets[i];
       const dx = t.x - player.x;
@@ -657,7 +812,6 @@
     bgCtx.fillStyle = vign;
     bgCtx.fillRect(0, 0, bw, bh);
   }
-
   // ---------- Drop shape ----------
   //
   // Key principle: the shape perturbation is in WORLD SPACE, not drop-local
@@ -904,17 +1058,167 @@
   }
 
   // ========================================================================
-  // DEBUG OVERLAY
+  // DEBUG OVERLAY + TUNING PANEL
   // ========================================================================
   const debugEl = document.getElementById('debug');
   const debugDot = document.getElementById('debugDot');
+  const tuningEl = document.getElementById('tuning');
   let debugOn = false;
   debugDot.addEventListener('click', (e) => {
     e.stopPropagation();
     debugOn = !debugOn;
     debugEl.classList.toggle('on', debugOn);
+    tuningEl.classList.toggle('on', debugOn);
     debugDot.classList.toggle('active', debugOn);
   });
+
+  // ---- Tuning panel: runtime sliders for the feel knobs ----
+  //
+  // Each slider directly mutates TUNE, so changes apply instantly with no
+  // reload. Values persist to localStorage keyed by the param name, so your
+  // adjustments survive refreshes. A per-slider ↺ and a "Reset All" button
+  // restore code defaults.
+  //
+  // Slider spec: [paramName, label, min, max, step, group]
+  const TUNING_SPEC = [
+    // Suction — the difficulty curve near edges
+    ['suctionStrength',   'strength',  100, 1500, 10, 'Edge Suction'],
+    ['suctionMassExp',    'mass exp',  0.5, 2.0,  0.05, 'Edge Suction'],
+    ['suctionReachPerR',  'reach/r',   0.2, 2.5,  0.05, 'Edge Suction'],
+    // Movement — tilt response
+    ['baseAccel',         'accel',     400, 2400, 20, 'Movement'],
+    ['massAccelExp',      'mass slow', 0.0, 1.0,  0.05, 'Movement'],
+    ['friction',          'friction',  0.95, 1.00, 0.002, 'Movement'],
+    // Wobble — jiggle on braking
+    ['wobSpring',         'spring',    10, 200,  2, 'Wobble'],
+    ['wobDamp',           'damp',      0, 20,    0.2, 'Wobble'],
+    ['wobImpulseScale',   'impulse',   0, 0.05,  0.001, 'Wobble'],
+  ];
+
+  // Capture code defaults ONCE before any localStorage overrides are applied,
+  // so the ↺ buttons can always restore original values.
+  const TUNE_DEFAULTS = {};
+  for (const [name] of TUNING_SPEC) TUNE_DEFAULTS[name] = TUNE[name];
+
+  // Apply any persisted overrides from localStorage
+  function loadPersistedTuning() {
+    try {
+      for (const [name] of TUNING_SPEC) {
+        const stored = localStorage.getItem('tune:' + name);
+        if (stored !== null) {
+          const n = parseFloat(stored);
+          if (!isNaN(n)) TUNE[name] = n;
+        }
+      }
+    } catch (e) { /* localStorage may be disabled; no-op */ }
+  }
+  loadPersistedTuning();
+
+  // Build the UI
+  function buildTuningUI() {
+    // Group by category preserving order
+    const groups = [];
+    const groupMap = new Map();
+    for (const spec of TUNING_SPEC) {
+      const g = spec[5];
+      if (!groupMap.has(g)) {
+        const obj = { name: g, items: [] };
+        groups.push(obj);
+        groupMap.set(g, obj);
+      }
+      groupMap.get(g).items.push(spec);
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const group of groups) {
+      const gDiv = document.createElement('div');
+      gDiv.className = 'group';
+      const gLabel = document.createElement('div');
+      gLabel.className = 'gLabel';
+      gLabel.textContent = group.name;
+      gDiv.appendChild(gLabel);
+
+      for (const [name, label, min, max, step] of group.items) {
+        const row = document.createElement('div');
+        row.className = 'row';
+
+        const top = document.createElement('div');
+        top.className = 'rowTop';
+        const pName = document.createElement('span');
+        pName.className = 'pName';
+        pName.textContent = label;
+        const right = document.createElement('span');
+        const pVal = document.createElement('span');
+        pVal.className = 'pVal';
+        pVal.id = 'val_' + name;
+        pVal.textContent = formatVal(TUNE[name], step);
+        const reset = document.createElement('button');
+        reset.className = 'resetBtn';
+        reset.textContent = '↺';
+        reset.setAttribute('aria-label', 'reset ' + label);
+        reset.addEventListener('click', (e) => {
+          e.stopPropagation();
+          TUNE[name] = TUNE_DEFAULTS[name];
+          slider.value = TUNE[name];
+          pVal.textContent = formatVal(TUNE[name], step);
+          try { localStorage.removeItem('tune:' + name); } catch (e) {}
+        });
+        right.appendChild(pVal);
+        right.appendChild(reset);
+        top.appendChild(pName);
+        top.appendChild(right);
+
+        const slider = document.createElement('input');
+        slider.type = 'range';
+        slider.min = min;
+        slider.max = max;
+        slider.step = step;
+        slider.value = TUNE[name];
+        slider.id = 'sl_' + name;
+        // 'input' fires continuously while dragging — instant feedback
+        slider.addEventListener('input', () => {
+          const v = parseFloat(slider.value);
+          TUNE[name] = v;
+          pVal.textContent = formatVal(v, step);
+          try { localStorage.setItem('tune:' + name, String(v)); } catch (e) {}
+        });
+
+        row.appendChild(top);
+        row.appendChild(slider);
+        gDiv.appendChild(row);
+      }
+      frag.appendChild(gDiv);
+    }
+
+    // Reset All button
+    const resetAll = document.createElement('button');
+    resetAll.className = 'resetAll';
+    resetAll.textContent = 'Reset All';
+    resetAll.addEventListener('click', (e) => {
+      e.stopPropagation();
+      for (const [name, , , , step] of TUNING_SPEC) {
+        TUNE[name] = TUNE_DEFAULTS[name];
+        const sl = document.getElementById('sl_' + name);
+        const vl = document.getElementById('val_' + name);
+        if (sl) sl.value = TUNE[name];
+        if (vl) vl.textContent = formatVal(TUNE[name], step);
+        try { localStorage.removeItem('tune:' + name); } catch (e) {}
+      }
+    });
+    frag.appendChild(resetAll);
+
+    tuningEl.appendChild(frag);
+  }
+
+  // Format a value with precision matching its step size. Integer steps → int
+  // display; 0.01 step → 2 decimals; 0.001 step → 3 decimals.
+  function formatVal(v, step) {
+    if (step >= 1) return Math.round(v).toString();
+    const decimals = Math.max(0, Math.ceil(-Math.log10(step)));
+    return v.toFixed(decimals);
+  }
+
+  buildTuningUI();
 
   let debugLastUpdate = 0;
   function updateDebug(now) {
@@ -961,7 +1265,7 @@
   }
   requestAnimationFrame((t) => { lastT = t; loop(t); });
 
-  // ========================================================================
+// ========================================================================
   // UI WIRING
   // ========================================================================
   const startOverlay = document.getElementById('start');
@@ -1024,4 +1328,3 @@
 </script>
 </body>
 </html>
-
