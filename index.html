@@ -322,7 +322,7 @@
 <div id="start" class="overlay">
   <div class="title">Liquid<span class="accent"> Screen</span></div>
   <div class="subtitle">Tilt your phone to roll the droplet.<br>Absorb others to grow.<br>Don't slide off.</div>
-  <button id="startBtn" class="btn">Tap to Calibrate</button>
+    <button id="startBtn" class="btn">Start</button>
   <div id="err" class="err" style="display:none"></div>
 </div>
 
@@ -1272,10 +1272,24 @@
   const startBtn = document.getElementById('startBtn');
   const replayBtn = document.getElementById('replayBtn');
 
+  async function enterFullscreenAndLock() {
+    try {
+      const el = document.documentElement;
+      const req = el.requestFullscreen || el.webkitRequestFullscreen ||
+                  el.mozRequestFullScreen || el.msRequestFullscreen;
+      if (req) await req.call(el).catch(() => {});
+    } catch (e) {}
+    try {
+      if (screen.orientation && screen.orientation.lock) {
+        await screen.orientation.lock('portrait').catch(() => {});
+      }
+    } catch (e) {}
+  }
+
   async function beginPlay() {
+    enterFullscreenAndLock();
     const ok = await requestOrientationPermission();
     if (!ok) return;
-    // Give one frame for a reading to come in, then calibrate
     setTimeout(() => {
       calBeta = rawBeta;
       calGamma = rawGamma;
