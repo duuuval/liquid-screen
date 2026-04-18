@@ -555,7 +555,7 @@
       return;
     }
 
-    // Collisions with targets
+        // Collisions with targets
     for (let i = targets.length - 1; i >= 0; i--) {
       const t = targets[i];
       const dx = t.x - player.x;
@@ -563,4 +563,465 @@
       const d = Math.hypot(dx, dy);
       // Absorb when the player's leading edge overlaps the target center-ish.
       // Using r + r*0.5 feels like "the target gets sucked in" rather than merely grazed.
-      if (d < p
+      if (d < player.r + t.r * 0.35) {
+        player.volume += t.volume;
+        player.r = deriveRadius(player.volume);
+        trueScore = player.volume;
+        targets.splice(i, 1);
+        spawnTarget(true);
+      }
+    }
+
+    // Score display lerp
+    const lerpK = 1 - Math.exp(-TUNE.scoreLerpHz * dt);
+    displayedScore += (trueScore - displayedScore) * lerpK;
+    updateScoreHUD();
+  }
+
+  const scoreEl = document.getElementById('score');
+  function updateScoreHUD(force) {
+    scoreEl.textContent = displayedScore.toFixed(1);
+  }
+
+  // ========================================================================
+  // RENDER
+  // ========================================================================
+  //
+  // Model: drops are DARK LENSES on a live animated background, with bright
+  // rim arcs on the upper edge (ambient top-light grazing the curve) and a
+  // small randomized pinpoint specular. Each drop refracts the background
+  // by sampling it, magnified and offset, clipped to the drop's shape.
+  //
+  // Layers per drop (bottom to top):
+  //   1. Soft shadow underneath (drop sits in a wet-ring halo)
+  //   2. Refraction: magnified/offset background sample, clipped to shape
+  //   3. Body tint: darkens toward rim, plus inner lower-shadow for dome feel
+  //   4. Bright rim arc on upper edge (linear-gradient-masked stroke)
+  //   5. Tiny pinpoint specular at a per-drop randomized position
+
+  // ---------- Animated background ----------
+  // Drawn live every frame to a dedicated offscreen canvas, which the drops
+  // then sample for refraction. Drawing to offscreen first (instead of the
+  // main canvas directly) lets us blit it once as the main background AND
+  // sample it per drop without re-generating gradients each time.
+  const bgCanvas = document.createElement('canvas');
+  const bgCtx = bgCanvas.getContext('2d');
+  // Render background at 0.6x resolution — imperceptible on a phone display,
+  // saves significant fill time when we have 10+ drops sampling it.
+  const BG_RES = 0.6;
+
+  function resizeBg() {
+    bgCanvas.width = Math.floor(W * BG_RES * DPR);
+    bgCanvas.height = Math.floor(H * BG_RES * DPR);
+  }
+  resizeBg();
+  window.addEventListener('resize', () => setTimeout(resizeBg, 50));
+
+  // Four slow-drifting colored blobs. Hues chosen to feel like phone-screen
+  // wallpaper reflections — blues, violets, a touch of teal.
+  const bgBlobs = [
+    { hue: 215, sat: 60, lig: 34, bx: 0.22, by: 0.18, ax: 0.10, ay: 0.07, sp: 0.05, ph: 0.0 },
+    { hue: 268, sat: 50, lig: 28, bx: 0.78, by: 0.30, ax: 0.12, ay: 0.09, sp: 0.06, ph: 1.7 },
+    { hue: 195, sat: 65, lig: 32, bx: 0.50, by: 0.82, ax: 0.14, ay: 0.07, sp: 0.04, ph: 3.1 },
+    { hue: 290, sat: 45, lig: 24, bx: 0.15, by: 0.92, ax: 0.09, ay: 0.06, sp: 0.07, ph: 4.4 },
+  ];
+
+  function renderBackground(tSec) {
+    const bw = bgCanvas.width;
+    const bh = bgCanvas.height;
+
+    // Inky base. The reference image has this deep near-black depth.
+    bgCtx.fillStyle = '#050810';
+    bgCtx.fillRect(0, 0, bw, bh);
+
+    // Additive blending on the blobs so overlaps build into brighter zones.
+    bgCtx.globalCompositeOperation = 'lighter';
+    for (const b of bgBlobs) {
+      const t = tSec * b.sp + b.ph;
+      const cx = (b.bx + Math.sin(t) * b.ax) * bw;
+      const cy = (b.by + Math.cos(t * 0.8) * b.ay) * bh;
+      const r = Math.max(bw, bh) * 0.55;
+      const g = bgCtx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      g.addColorStop(0, `hsla(${b.hue}, ${b.sat}%, ${b.lig}%, 0.9)`);
+      g.addColorStop(0.5, `hsla(${b.hue}, ${b.sat}%, ${b.lig * 0.5}%, 0.4)`);
+      g.addColorStop(1, `hsla(${b.hue}, ${b.sat}%, ${b.lig * 0.2}%, 0)`);
+      bgCtx.fillStyle = g;
+      bgCtx.fillRect(0, 0, bw, bh);
+    }
+    bgCtx.globalCompositeOperation = 'source-over';
+
+    // Vignette — darker edges anchor the scene and make edge-drops feel heavier.
+    const vign = bgCtx.createRadialGradient(bw * 0.5, bh * 0.5, bw * 0.3, bw * 0.5, bh * 0.5, Math.max(bw, bh) * 0.75);
+    vign.addColorStop(0, 'rgba(0,0,0,0)');
+    vign.addColorStop(1, 'rgba(0,0,0,0.5)');
+    bgCtx.fillStyle = vign;
+    bgCtx.fillRect(0, 0, bw, bh);
+  }
+
+  // ---------- Drop shape ----------
+  //
+  // Key principle: the shape perturbation is in WORLD SPACE, not drop-local
+  // space. This means as the drop moves, different parts of its circumference
+  // face the direction of travel — the shape doesn't rotate with the drop.
+  // (A real drop has no "front"; it's an object being deformed by forces.)
+  //
+  // The path builder takes:
+  //   r        — base radius
+  //   sig      — shape signature (the lumpy circumference)
+  //   stretch  — 0..~0.3 ellipse factor from velocity (directional)
+  //   stretchAngle — world-space direction of stretch
+  //   wobble   — {x, y} world-space offset oscillation for jiggle (applied
+  //              as a directional scaling that oscillates over time)
+  //
+  // We build the path as points directly in world-offset coordinates
+  // (relative to drop center). Then when drawing, we only TRANSLATE to
+  // (cx, cy) — no rotate, no scale. All deformation lives in the points.
+  function buildDropPath(r, sig, stretch, stretchAngle, wobbleX, wobbleY) {
+    const path = new Path2D();
+    const N = Math.min(64, Math.max(28, Math.floor(r * 0.7)));
+
+    // Precompute stretch matrix components. Stretch elongates along the
+    // stretchAngle axis and squashes perpendicular, preserving approx area.
+    const cosA = Math.cos(stretchAngle);
+    const sinA = Math.sin(stretchAngle);
+    const sx = 1 + stretch;
+    const sy = 1 / (1 + stretch * 0.6);
+
+    for (let i = 0; i <= N; i++) {
+      const theta = (i / N) * Math.PI * 2;
+      // World-space perturbation: theta is the angle in world coords, not
+      // in drop-local coords. The shape signature is fixed to world orientation.
+      const perturb =
+        sig.a1 * Math.cos(3 * theta + sig.p1) +
+        sig.a2 * Math.cos(4 * theta + sig.p2) +
+        sig.a3 * Math.cos(5 * theta + sig.p3);
+      const rr = r * (1 + perturb);
+
+      // Base point on the perturbed circle (world coords relative to center)
+      let px = Math.cos(theta) * rr;
+      let py = Math.sin(theta) * rr;
+
+      // Apply velocity stretch: rotate into stretch frame, scale, rotate back.
+      // Equivalent to a single affine transform; inlined for speed.
+      const localX =  px * cosA + py * sinA;
+      const localY = -px * sinA + py * cosA;
+      const stretchedX = localX * sx;
+      const stretchedY = localY * sy;
+      px = stretchedX * cosA - stretchedY * sinA;
+      py = stretchedX * sinA + stretchedY * cosA;
+
+      // Wobble: a time-varying directional deformation. wobbleX/Y are
+      // world-space "push" vectors, applied as a small stretch along that
+      // direction. Scales with distance from center, so the whole drop
+      // oscillates rather than just one side.
+      if (wobbleX !== 0 || wobbleY !== 0) {
+        const wMag = Math.hypot(wobbleX, wobbleY);
+        if (wMag > 0.001) {
+          const wx = wobbleX / wMag;
+          const wy = wobbleY / wMag;
+          // Component of this circumference point along the wobble axis
+          const along = px * wx + py * wy;
+          // Push outward along wobble axis, proportional to wMag.
+          px += wx * along * wMag * 0.35;
+          py += wy * along * wMag * 0.35;
+        }
+      }
+
+      if (i === 0) path.moveTo(px, py);
+      else path.lineTo(px, py);
+    }
+    path.closePath();
+    return path;
+  }
+
+  // amplitude = total max perturbation as a fraction of radius.
+  function makeShapeSig(amplitude) {
+    return {
+      a1: (0.5 + Math.random() * 0.5) * amplitude * 0.55,
+      a2: (0.5 + Math.random() * 0.5) * amplitude * 0.30,
+      a3: (0.5 + Math.random() * 0.5) * amplitude * 0.15,
+      p1: Math.random() * Math.PI * 2,
+      p2: Math.random() * Math.PI * 2,
+      p3: Math.random() * Math.PI * 2,
+      // Per-drop pinpoint specular position — in WORLD-space normalized
+      // coords, so it stays fixed in the world regardless of drop motion.
+      // Not biased anymore — true ambient light, no "upper" direction.
+      specX: (Math.random() - 0.5) * 1.3,
+      specY: (Math.random() - 0.5) * 1.3,
+    };
+  }
+
+  // ---------- Drop renderer ----------
+  // cx, cy: center in main-canvas CSS pixels (world coords)
+  // r: radius in CSS pixels
+  // stretch: 0..~0.3 ellipse factor (velocity-driven)
+  // stretchAngle: world-space direction of stretch
+  // wobbleX, wobbleY: world-space wobble push vector (for jiggle on braking)
+  // sig: shape signature from makeShapeSig
+  // appear: 0..1 splat-in scale
+  //
+  // Lighting model: NO directional light. Drops have uniform radial darkening
+  // toward silhouette (genuine optics — a glass bead darkens at its edge
+  // regardless of light angle), plus a small per-drop pinpoint specular at
+  // a WORLD-FIXED position (light glints that don't rotate with motion).
+  function drawDroplet(cx, cy, r, stretch, stretchAngle, wobbleX, wobbleY, sig, appear) {
+    r *= appear;
+    if (r < 0.5) return;
+
+    // --- 1. Shadow underneath — drawn in world coords. Does NOT deform with
+    //        the drop shape because the shadow is on the surface below, not
+    //        on the drop. Small offset downward (ambient soft shadow).
+    const shR = r * 1.25;
+    const shadowGrad = ctx.createRadialGradient(cx, cy + r * 0.08, r * 0.6, cx, cy + r * 0.08, shR);
+    shadowGrad.addColorStop(0, 'rgba(0, 3, 10, 0.42)');
+    shadowGrad.addColorStop(0.7, 'rgba(0, 3, 10, 0.15)');
+    shadowGrad.addColorStop(1, 'rgba(0, 3, 10, 0)');
+    ctx.fillStyle = shadowGrad;
+    ctx.beginPath();
+    ctx.arc(cx, cy + r * 0.08, shR, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Path is built in world-relative coords (origin = drop center).
+    // All deformation (shape, stretch, wobble) is baked into the path points.
+    // We only TRANSLATE when drawing — no rotate, no scale.
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    const path = buildDropPath(r, sig, stretch, stretchAngle, wobbleX, wobbleY);
+
+    // --- 2. Refraction. Clip to drop shape, blit background magnified/shifted.
+    ctx.save();
+    ctx.clip(path);
+
+    const MAG = 1.20;
+    // Offset the sample toward screen center — edge drops warp more.
+    const ncx = cx / W - 0.5;
+    const ncy = cy / H - 0.5;
+    const offX = -ncx * r * 0.55;
+    const offY = -ncy * r * 0.55;
+    const drawW = W * MAG;
+    const drawH = H * MAG;
+    const dx = -cx * MAG + offX;
+    const dy = -cy * MAG + offY;
+    ctx.drawImage(bgCanvas, dx, dy, drawW, drawH);
+
+    // --- 3. Body tint — uniform radial darkening toward silhouette.
+    //        This is genuine optics: a transparent dome looks darker at its
+    //        edge because light travels through more medium there (longer path).
+    //        Applied as a radial gradient centered on the drop, from clear
+    //        at center to dark at radius.
+    const bodyGrad = ctx.createRadialGradient(0, 0, r * 0.15, 0, 0, r * 1.1);
+    bodyGrad.addColorStop(0, 'rgba(3, 8, 20, 0)');
+    bodyGrad.addColorStop(0.5, 'rgba(3, 8, 20, 0.10)');
+    bodyGrad.addColorStop(0.80, 'rgba(2, 5, 15, 0.40)');
+    bodyGrad.addColorStop(1, 'rgba(0, 1, 8, 0.75)');
+    ctx.fillStyle = bodyGrad;
+    ctx.fillRect(-r * 1.5, -r * 1.5, r * 3.0, r * 3.0);
+
+    ctx.restore(); // end clip
+
+    // --- 4. Dark silhouette rim — thin dark stroke on the drop outline.
+    //        Non-directional. This gives the "pinched by surface tension"
+    //        look without implying a light source.
+    ctx.strokeStyle = 'rgba(2, 6, 18, 0.55)';
+    ctx.lineWidth = Math.max(0.8, r * 0.035);
+    ctx.lineJoin = 'round';
+    ctx.stroke(path);
+
+    // --- 5. Pinpoint specular — tiny sharp dot at a per-drop WORLD-SPACE
+    //        random position. Because specX/specY are in world coords
+    //        (not drop-local), they stay fixed relative to the world as the
+    //        drop moves — consistent with ambient light glints.
+    //        We draw it clipped to the drop shape so it doesn't poke outside
+    //        when the drop stretches past it.
+    ctx.save();
+    ctx.clip(path);
+    const pinX = sig.specX * r;
+    const pinY = sig.specY * r;
+    const pinR = r * 0.09;
+    const pinGrad = ctx.createRadialGradient(pinX, pinY, 0, pinX, pinY, pinR);
+    pinGrad.addColorStop(0, 'rgba(255, 255, 255, 0.75)');
+    pinGrad.addColorStop(0.5, 'rgba(240, 250, 255, 0.28)');
+    pinGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.fillStyle = pinGrad;
+    ctx.beginPath();
+    ctx.arc(pinX, pinY, pinR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  // ---------- Frame ----------
+  function render() {
+    const tSec = performance.now() / 1000;
+
+    // 1. Regenerate background each frame (live, not cached).
+    renderBackground(tSec);
+
+    // 2. Blit bg to main canvas as the scene backdrop.
+    ctx.drawImage(bgCanvas, 0, 0, W, H);
+
+    // Don't draw drops until the game has been started at least once.
+    // Before resetGame() runs, player.sig is null and targets is empty.
+    if (state === STATE.READY) return;
+
+    // 3. Draw targets with splat-in animation. Static drops have no stretch
+    //    and no wobble — they're at rest.
+    const now = performance.now();
+    for (const t of targets) {
+      const age = (now - t.spawnT) / 1000;
+      let appear;
+      if (age < 0.22) {
+        const k = age / 0.22;
+        // Overshoot-and-settle
+        appear = 1 + 0.35 * Math.sin(k * Math.PI) - (1 - k) * 0.6;
+        appear = Math.max(0, appear);
+      } else {
+        appear = 1;
+      }
+      drawDroplet(t.x, t.y, t.r, 0, 0, 0, 0, t.sig, appear);
+    }
+
+    // 4. Draw player drop with velocity-based stretch and wobble.
+    const speed = Math.hypot(player.vx, player.vy);
+    const stretch = Math.min(TUNE.stretchMax, (speed / TUNE.stretchVelRef) * TUNE.stretchMax * 1.4);
+    const stretchAngle = Math.atan2(player.vy, player.vx);
+    drawDroplet(player.x, player.y, player.r, stretch, stretchAngle,
+                player.wobX, player.wobY, player.sig, 1);
+  }
+
+  // ========================================================================
+  // GAME OVER
+  // ========================================================================
+  const overOverlay = document.getElementById('over');
+  const finalScoreEl = document.getElementById('finalScore');
+
+  function triggerGameOver() {
+    state = STATE.OVER;
+    finalScoreEl.textContent = trueScore.toFixed(1);
+    overOverlay.classList.remove('hidden');
+  }
+
+  // ========================================================================
+  // DEBUG OVERLAY
+  // ========================================================================
+  const debugEl = document.getElementById('debug');
+  const debugDot = document.getElementById('debugDot');
+  let debugOn = false;
+  debugDot.addEventListener('click', (e) => {
+    e.stopPropagation();
+    debugOn = !debugOn;
+    debugEl.classList.toggle('on', debugOn);
+    debugDot.classList.toggle('active', debugOn);
+  });
+
+  let debugLastUpdate = 0;
+  function updateDebug(now) {
+    if (!debugOn) return;
+    if (now - debugLastUpdate < 100) return; // 10hz update — don't thrash the DOM
+    debugLastUpdate = now;
+
+    const eventsFresh = (now - lastOrientationT) < 500;
+    const eventStatus = haveOrientation
+      ? (eventsFresh ? '<span class="ok">LIVE</span>' : '<span class="bad">STALLED</span>')
+      : '<span class="bad">NONE</span>';
+
+    const { nx, ny } = currentTilt();
+    const speed = Math.hypot(player.vx, player.vy);
+    const suctionMag = Math.hypot(player._suctionX || 0, player._suctionY || 0);
+    const suctionStatus = suctionMag < 1 ? 'none' :
+                          suctionMag < 200 ? `<span class="ok">${suctionMag.toFixed(0)}</span>` :
+                          `<span class="bad">${suctionMag.toFixed(0)}</span>`;
+
+    debugEl.innerHTML =
+      `<span class="k">orient:</span> ${eventStatus} <span class="k">(${orientationEventCount})</span><br>` +
+      `<span class="k">raw β γ:</span> ${rawBeta.toFixed(1)} ${rawGamma.toFixed(1)}<br>` +
+      `<span class="k">cal β γ:</span> ${calBeta.toFixed(1)} ${calGamma.toFixed(1)}<br>` +
+      `<span class="k">tilt n:</span> ${nx.toFixed(2)} ${ny.toFixed(2)}<br>` +
+      `<span class="k">pos:</span> ${player.x.toFixed(0)} ${player.y.toFixed(0)}<br>` +
+      `<span class="k">vel:</span> ${speed.toFixed(0)} px/s<br>` +
+      `<span class="k">suction:</span> ${suctionStatus} px/s²<br>` +
+      `<span class="k">vol:</span> ${player.volume.toFixed(1)} µL<br>` +
+      `<span class="k">state:</span> ${state}`;
+  }
+
+  // ========================================================================
+  // MAIN LOOP
+  // ========================================================================
+  function loop(t) {
+    const dtRaw = (t - lastT) / 1000;
+    lastT = t;
+    // Clamp dt to avoid huge jumps when tab was backgrounded
+    const dt = Math.min(0.05, Math.max(0, dtRaw));
+    update(dt);
+    render();
+    updateDebug(t);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame((t) => { lastT = t; loop(t); });
+
+  // ========================================================================
+  // UI WIRING
+  // ========================================================================
+  const startOverlay = document.getElementById('start');
+  const startBtn = document.getElementById('startBtn');
+  const replayBtn = document.getElementById('replayBtn');
+
+  async function beginPlay() {
+    const ok = await requestOrientationPermission();
+    if (!ok) return;
+    // Give one frame for a reading to come in, then calibrate
+    setTimeout(() => {
+      calBeta = rawBeta;
+      calGamma = rawGamma;
+      startOverlay.classList.add('hidden');
+      resetGame();
+      state = STATE.PLAYING;
+    }, 150);
+  }
+
+  startBtn.addEventListener('click', beginPlay);
+  replayBtn.addEventListener('click', () => {
+    // Re-calibrate on replay too — player may be holding phone differently
+    calBeta = rawBeta;
+    calGamma = rawGamma;
+    overOverlay.classList.add('hidden');
+    resetGame();
+    state = STATE.PLAYING;
+  });
+
+  // Dev fallback — desktop testing without a gyroscope (arrow keys / pointer)
+  // Only active if no orientation events come in within 2 seconds of play.
+  let devFallback = false;
+  setTimeout(() => {
+    if (!haveOrientation && state !== STATE.READY) {
+      enableDevFallback();
+    }
+  }, 2000);
+  function enableDevFallback() {
+    devFallback = true;
+    const keys = {};
+    window.addEventListener('keydown', e => { keys[e.key] = true; });
+    window.addEventListener('keyup', e => { keys[e.key] = false; });
+    // Synthesize orientation from arrow keys
+    setInterval(() => {
+      if (!devFallback) return;
+      let gx = 0, gy = 0;
+      if (keys.ArrowLeft) gx -= 25;
+      if (keys.ArrowRight) gx += 25;
+      if (keys.ArrowUp) gy -= 25;
+      if (keys.ArrowDown) gy += 25;
+      rawGamma = gx;
+      rawBeta = gy;
+    }, 16);
+  }
+
+  // Prevent pull-to-refresh and scroll bounce
+  document.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+
+})();
+</script>
+</body>
+</html>
+
