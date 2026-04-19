@@ -402,10 +402,11 @@
     tiltMaxDeg: 35,          // beyond this tilt, you're already at max accel — don't require wrist-breaking angles
     tiltDeadzone: 1.5,       // degrees — ignore tiny jitter when phone is "flat"
     // Starting state
-    startVolume: 50.0,       // µL
-    minVolume: 12,           // target drop min volume — keeps tiny drops visible
-    maxVolume: 24,           // target drop max volume
-    targetCount: 16,         // on-screen static drops — denser at small scale for visual life
+    startVolume: 500.0,      // µL — player starts here. Higher = scores feel chunky.
+    minVolume: 8,            // target drop min volume
+    maxVolume: 40,           // target drop max volume
+    targetCount: 12,         // on-screen static drops
+    microCount: 300,         // atmospheric drops — visual density, no game effect
     // Visuals
     radiusPerUL: 1.25,       // px per µL — r = radiusPerUL * cbrt(volume) * tuningConstant — actually, we use area scaling (see deriveRadius)
     stretchMax: 0.28,        // max ellipse stretch factor at high speed (0.28 = 28% elongation)
@@ -457,48 +458,6 @@
     // Score animation
     scoreLerpHz: 6,          // how fast the displayed score chases true score (higher = faster)
   };
-
-  // ========================================================================
-  // LEVEL PROGRESSION
-  // ========================================================================
-  // Staged zoom-out with ambient color shift. As the player grows past each
-  // threshold, the world visibly expands around them (drop is rendered
-  // smaller, world gets proportionally larger playable area). Color shifts
-  // subtly toward deeper, more dramatic palettes. Each threshold triggers
-  // a cinematic transition: 2.5s tween + soft edge-pulse effect.
-  //
-  // Physics stays world-space-identical across zooms — only rendering and
-  // spawn bounds scale. From the physics' perspective, nothing changes;
-  // from the player's, relief arrives with a new wider playfield.
-  const LEVELS = [
-    // level 0 is the starting state — no transition, current palette
-    { threshold: 0,    zoom: 1.00, bgHueShift: 0,   bgLigMul: 1.00 },
-    { threshold: 500,  zoom: 0.70, bgHueShift: -8,  bgLigMul: 0.92 },
-    { threshold: 1000, zoom: 0.50, bgHueShift: -14, bgLigMul: 0.83 },
-    { threshold: 2000, zoom: 0.36, bgHueShift: -20, bgLigMul: 0.74 },
-    { threshold: 4000, zoom: 0.26, bgHueShift: -26, bgLigMul: 0.65 },
-  ];
-  const LEVEL_TRANSITION_MS = 2500;   // full cinematic duration
-
-  // Level state
-  let currentLevel = 0;
-  let zoomFactor = 1.0;                 // currently-rendered zoom (animates)
-  let zoomFactorTarget = 1.0;           // what we're tweening toward
-  let zoomFactorStart = 1.0;            // where tween started
-  let transitionStart = 0;              // 0 when not transitioning
-  let bgHueShiftCurrent = 0;            // current animated color shift
-  let bgLigMulCurrent = 1.0;
-  let bgHueShiftTarget = 0;
-  let bgLigMulTarget = 1.0;
-  let bgHueShiftStart = 0;
-  let bgLigMulStart = 1.0;
-  // Zoom anchor — the world-space point that stays fixed on screen during
-  // the zoom transform. Set to the player's world position at level-up
-  // trigger time, so the zoom visually expands *from where you are*.
-  let zoomAnchorWorldX = 0;
-  let zoomAnchorWorldY = 0;
-  let zoomAnchorScreenX = 0;
-  let zoomAnchorScreenY = 0;
 
   // Physical radius from volume. r = k * sqrt(volume).
   // Tuned for real-water-drop scale on a phone screen. Starting player
@@ -567,7 +526,7 @@
   //                     Small enough that steady-state growth is slow, but
   //                     meaningful — reinforces the "rain soaks you" idea.
   //   MICRO_ALPHA: render opacity — keeps micros subtle vs game drops
-  const MICRO_COUNT = 350;
+  // (MICRO_COUNT is now TUNE.microCount — runtime-adjustable)
   const MICRO_MIN_R = 1.6;
   const MICRO_MAX_R = 3.2;
   const MICRO_RESPAWN_MS = 3000;
@@ -586,33 +545,16 @@
   // Time
   let lastT = performance.now();
 
-  // World bounds (in world-space coordinates). The visible rectangle is
-  // the inverse of the render transform: whatever world region maps to
-  // [0,W] x [0,H] on screen. Since rendering is
-  //   screenX = anchorScreenX + (worldX - anchorWorldX) * zoom
-  // the visible world bounds are anchor-centered, not origin-anchored:
-  //   worldMinX = anchorWorldX - anchorScreenX / zoom
-  //   worldMaxX = anchorWorldX + (W - anchorScreenX) / zoom
-  // At zoom=1 with anchor at screen center this degenerates to [0,W]×[0,H],
-  // matching the pre-zoom starting state.
-  function worldMinX() { return zoomAnchorWorldX - zoomAnchorScreenX / zoomFactor; }
-  function worldMaxX() { return zoomAnchorWorldX + (W - zoomAnchorScreenX) / zoomFactor; }
-  function worldMinY() { return zoomAnchorWorldY - zoomAnchorScreenY / zoomFactor; }
-  function worldMaxY() { return zoomAnchorWorldY + (H - zoomAnchorScreenY) / zoomFactor; }
-  function worldW() { return worldMaxX() - worldMinX(); }
-  function worldH() { return worldMaxY() - worldMinY(); }
-  function worldCenterX() { return (worldMinX() + worldMaxX()) / 2; }
-  function worldCenterY() { return (worldMinY() + worldMaxY()) / 2; }
-
-  // Target count scales with visible area so density stays constant.
-  function effectiveTargetCount() {
-    const areaRatio = 1 / (zoomFactor * zoomFactor);
-    return Math.round(TUNE.targetCount * areaRatio);
-  }
-  function effectiveMicroCount() {
-    const areaRatio = 1 / (zoomFactor * zoomFactor);
-    return Math.round(MICRO_COUNT * areaRatio);
-  }
+  // World bounds are simply the screen rectangle [0, W] × [0, H]. The game
+  // plays in a fixed-size arena the size of the device's viewport.
+  function worldMinX() { return 0; }
+  function worldMaxX() { return W; }
+  function worldMinY() { return 0; }
+  function worldMaxY() { return H; }
+  function worldW() { return W; }
+  function worldH() { return H; }
+  function worldCenterX() { return W / 2; }
+  function worldCenterY() { return H / 2; }
 
   // ========================================================================
   // SPAWNING
@@ -653,7 +595,7 @@
     microDrops.length = 0;
     const minX = worldMinX(), rangeX = worldMaxX() - minX;
     const minY = worldMinY(), rangeY = worldMaxY() - minY;
-    for (let i = 0; i < MICRO_COUNT; i++) {
+    for (let i = 0; i < TUNE.microCount; i++) {
       microDrops.push(newMicroDrop(minX + Math.random() * rangeX, minY + Math.random() * rangeY));
     }
   }
@@ -687,21 +629,6 @@
     trueScore = TUNE.startVolume;
     displayedScore = TUNE.startVolume;
     updateScoreHUD(true);
-    // Reset level progression — every run starts fresh at level 0.
-    currentLevel = 0;
-    zoomFactor = 1.0;
-    zoomFactorTarget = 1.0;
-    zoomFactorStart = 1.0;
-    transitionStart = 0;
-    bgHueShiftCurrent = 0;
-    bgLigMulCurrent = 1.0;
-    bgHueShiftTarget = 0;
-    bgLigMulTarget = 1.0;
-    // Anchor at player start position (screen + world center at zoom=1)
-    zoomAnchorWorldX = W / 2;
-    zoomAnchorWorldY = H / 2;
-    zoomAnchorScreenX = W / 2;
-    zoomAnchorScreenY = H / 2;
     for (let i = 0; i < TUNE.targetCount; i++) spawnTarget(true);
     seedMicroDrops();
   }
@@ -860,6 +787,17 @@
         targets.splice(i, 1);
         spawnTarget(true);
       }
+    }
+
+    // Live rebalance — if TUNE.targetCount / TUNE.microCount have been
+    // changed by the tuning sliders, reconcile the pools to match without
+    // requiring a replay. Pop excess from the end (cheap, doesn't disturb
+    // drops the player is currently engaging with near them).
+    while (targets.length > TUNE.targetCount) targets.pop();
+    while (targets.length < TUNE.targetCount) spawnTarget(true);
+    while (microDrops.length > TUNE.microCount) microDrops.pop();
+    while (microDrops.length < TUNE.microCount) {
+      microDrops.push(newMicroDrop(Math.random() * W, Math.random() * H));
     }
 
     // Target physics — each drop is now a mini physics object. Tilt pushes
@@ -1062,80 +1000,6 @@
     const lerpK = 1 - Math.exp(-TUNE.scoreLerpHz * dt);
     displayedScore += (trueScore - displayedScore) * lerpK;
     updateScoreHUD();
-
-    // Level progression — check if the player has crossed a threshold that
-    // we haven't yet triggered. Triggers the cinematic zoom + color shift.
-    // We only advance UP — once you've unlocked a level this run, you keep
-    // it even if absorbed volume drops below the threshold (unlikely, but
-    // prevents flicker if we ever add volume-loss mechanics).
-    for (let lvl = LEVELS.length - 1; lvl > currentLevel; lvl--) {
-      if (player.volume >= LEVELS[lvl].threshold) {
-        triggerLevelUp(lvl);
-        break;
-      }
-    }
-
-    // Animate zoom/color tween if a transition is in progress.
-    if (transitionStart > 0) {
-      const elapsed = performance.now() - transitionStart;
-      if (elapsed >= LEVEL_TRANSITION_MS) {
-        // Finished
-        zoomFactor = zoomFactorTarget;
-        bgHueShiftCurrent = bgHueShiftTarget;
-        bgLigMulCurrent = bgLigMulTarget;
-        transitionStart = 0;
-      } else {
-        // Ease-in-out quad: slow start, fast middle, slow end
-        const t = elapsed / LEVEL_TRANSITION_MS;
-        const eased = t < 0.5
-          ? 2 * t * t
-          : 1 - Math.pow(-2 * t + 2, 2) / 2;
-        zoomFactor = zoomFactorStart + (zoomFactorTarget - zoomFactorStart) * eased;
-        bgHueShiftCurrent = bgHueShiftStart + (bgHueShiftTarget - bgHueShiftStart) * eased;
-        bgLigMulCurrent = bgLigMulStart + (bgLigMulTarget - bgLigMulStart) * eased;
-      }
-    }
-  }
-
-  function triggerLevelUp(level) {
-    const def = LEVELS[level];
-    // Compute player's current rendered screen position using the CURRENT
-    // anchor (before we change anything). This becomes the new anchor
-    // so the zoom visually expands from where the player is right now.
-    const curScreenX = (player.x - zoomAnchorWorldX) * zoomFactor + zoomAnchorScreenX;
-    const curScreenY = (player.y - zoomAnchorWorldY) * zoomFactor + zoomAnchorScreenY;
-    // New anchor: player's current world pos <-> player's current screen pos
-    zoomAnchorWorldX = player.x;
-    zoomAnchorWorldY = player.y;
-    zoomAnchorScreenX = curScreenX;
-    zoomAnchorScreenY = curScreenY;
-    // Kick off the zoom/color tween
-    currentLevel = level;
-    zoomFactorStart = zoomFactor;
-    zoomFactorTarget = def.zoom;
-    bgHueShiftStart = bgHueShiftCurrent;
-    bgHueShiftTarget = def.bgHueShift;
-    bgLigMulStart = bgLigMulCurrent;
-    bgLigMulTarget = def.bgLigMul;
-    transitionStart = performance.now();
-    // PRE-POPULATE the full post-zoom world BEFORE the tween starts. The
-    // fiction: "it's been raining out there too." Without this, the zoom-out
-    // reveals empty periphery that fills in slowly via normal respawn — and
-    // the trail the player leaves behind competes with that fill, so the
-    // middle stays bare. Solution: temporarily set zoomFactor to the target
-    // so spawn bounds + count functions compute against the FINAL world
-    // size, populate, then restore. The tween starts from full.
-    const savedZoom = zoomFactor;
-    zoomFactor = zoomFactorTarget;
-    const targetNeeded = effectiveTargetCount();
-    while (targets.length < targetNeeded) spawnTarget(true);
-    const microNeeded = effectiveMicroCount();
-    const minX = worldMinX(), rangeX = worldMaxX() - minX;
-    const minY = worldMinY(), rangeY = worldMaxY() - minY;
-    while (microDrops.length < microNeeded) {
-      microDrops.push(newMicroDrop(minX + Math.random() * rangeX, minY + Math.random() * rangeY));
-    }
-    zoomFactor = savedZoom;
   }
 
   const scoreEl = document.getElementById('score');
@@ -1195,21 +1059,16 @@
     bgCtx.fillRect(0, 0, bw, bh);
 
     // Additive blending on the blobs so overlaps build into brighter zones.
-    // Per-level color shift: hue rotates by bgHueShiftCurrent degrees and
-    // luminance scales by bgLigMulCurrent. This is how "the storm deepens"
-    // visually as the player unlocks new levels.
     bgCtx.globalCompositeOperation = 'lighter';
     for (const b of bgBlobs) {
       const t = tSec * b.sp + b.ph;
       const cx = (b.bx + Math.sin(t) * b.ax) * bw;
       const cy = (b.by + Math.cos(t * 0.8) * b.ay) * bh;
       const r = Math.max(bw, bh) * 0.55;
-      const hue = ((b.hue + bgHueShiftCurrent) % 360 + 360) % 360;
-      const lig = b.lig * bgLigMulCurrent;
       const g = bgCtx.createRadialGradient(cx, cy, 0, cx, cy, r);
-      g.addColorStop(0, `hsla(${hue}, ${b.sat}%, ${lig}%, 0.9)`);
-      g.addColorStop(0.5, `hsla(${hue}, ${b.sat}%, ${lig * 0.5}%, 0.4)`);
-      g.addColorStop(1, `hsla(${hue}, ${b.sat}%, ${lig * 0.2}%, 0)`);
+      g.addColorStop(0, `hsla(${b.hue}, ${b.sat}%, ${b.lig}%, 0.9)`);
+      g.addColorStop(0.5, `hsla(${b.hue}, ${b.sat}%, ${b.lig * 0.5}%, 0.4)`);
+      g.addColorStop(1, `hsla(${b.hue}, ${b.sat}%, ${b.lig * 0.2}%, 0)`);
       bgCtx.fillStyle = g;
       bgCtx.fillRect(0, 0, bw, bh);
     }
@@ -1355,46 +1214,23 @@
     const path = buildDropPath(r, sig, stretch, stretchAngle, wobbleX, wobbleY);
 
     // --- 2. Refraction. Clip to drop shape, blit background magnified/shifted.
-    //
-    // The clip path was built in drop-local coords under the active zoom
-    // transform, so it's now a screen-space region where the drop is visible.
-    // Clips persist across setTransform changes in canvas 2D, so we can drop
-    // to identity-ish (DPR-only) transform for the drawImage, do the math
-    // in screen space where it's simple, then restore. This keeps the
-    // refraction sampling at a consistent MAG× magnification regardless of
-    // world zoom — fixing the "magnifying glass" hard-edge that appeared at
-    // non-1.0 zoom levels.
+    // --- 2. Refraction. Clip to drop shape, blit background magnified/shifted.
+    //        We're inside ctx.translate(cx, cy), so drop-local origin = (0,0).
     ctx.save();
     ctx.clip(path);
 
-    // Drop center's actual screen position (accounting for zoom transform).
-    const screenCx = zoomAnchorScreenX + (cx - zoomAnchorWorldX) * zoomFactor;
-    const screenCy = zoomAnchorScreenY + (cy - zoomAnchorWorldY) * zoomFactor;
-    // Drop's apparent on-screen radius (what the user actually sees).
-    const rScreen = r * zoomFactor;
-
-    // Swap out of the zoom transform for the bg blit. setTransform resets
-    // the matrix entirely; we set it to the base DPR transform that the
-    // main canvas was initialized with. The clip (baked into screen space
-    // at this point) still applies.
-    ctx.save();
-    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-
     const MAG = 1.20;
     // Edge-parallax: drops farther from screen center warp the background more.
-    const ncx = screenCx / W - 0.5;
-    const ncy = screenCy / H - 0.5;
-    const offX = -ncx * rScreen * 0.55;
-    const offY = -ncy * rScreen * 0.55;
-    // Pure screen-space math, same as pre-zoom: magnify bg by MAG, anchor so
-    // the drop center samples the drop's screen position.
+    const ncx = cx / W - 0.5;
+    const ncy = cy / H - 0.5;
+    const offX = -ncx * r * 0.55;
+    const offY = -ncy * r * 0.55;
     const drawW = W * MAG;
     const drawH = H * MAG;
-    const dx = -screenCx * MAG + screenCx + offX;
-    const dy = -screenCy * MAG + screenCy + offY;
+    // drawImage top-left in drop-local coords (we're translated to (cx,cy)).
+    const dx = -cx * MAG + offX;
+    const dy = -cy * MAG + offY;
     ctx.drawImage(bgCanvas, dx, dy, drawW, drawH);
-
-    ctx.restore(); // restore zoom transform
 
     // --- 3. Body tint — uniform radial darkening toward silhouette.
     //        This is genuine optics: a transparent dome looks darker at its
@@ -1459,16 +1295,6 @@
     // Before resetGame() runs, player.sig is null and targets is empty.
     if (state === STATE.READY) return;
 
-    // 2.5. Apply zoom transform around the anchor point. Everything drawn
-    //      after this is in world coords, rendered at current zoomFactor.
-    //      Transform: translate to screen anchor, scale, translate by
-    //      negative world anchor. Net effect: (worldX, worldY) renders at
-    //      (worldAnchorScreen + (worldX - worldAnchorWorld) * zoom).
-    ctx.save();
-    ctx.translate(zoomAnchorScreenX, zoomAnchorScreenY);
-    ctx.scale(zoomFactor, zoomFactor);
-    ctx.translate(-zoomAnchorWorldX, -zoomAnchorWorldY);
-
     // 2b. Micro drops — atmospheric layer. Rendered using the same
     // drawDroplet() path as game drops for visual consistency (refraction,
     // rim, pinpoint specular), just at tiny radius and with reduced alpha
@@ -1504,34 +1330,6 @@
     const stretchAngle = Math.atan2(player.vy, player.vx);
     drawDroplet(player.x, player.y, player.r, stretch, stretchAngle,
                 player.wobX, player.wobY, player.sig, 1);
-
-    // End zoom transform
-    ctx.restore();
-
-    // 5. Edge pulse overlay — during level-up transitions, a soft inward
-    //    glow radiates from the screen edges toward center, peaking around
-    //    the middle of the transition and fading as it ends. Signals
-    //    "something meaningful happened" without text or UI.
-    if (transitionStart > 0) {
-      const elapsed = performance.now() - transitionStart;
-      const t = Math.min(1, elapsed / LEVEL_TRANSITION_MS);
-      // Bell-shaped pulse intensity: ramps up in first half, fades in second.
-      // Peak at t=0.5.
-      const pulseAlpha = Math.sin(t * Math.PI) * 0.45;
-      if (pulseAlpha > 0.01) {
-        // Color scales with level — higher levels pulse deeper/warmer
-        const levelPulseHue = 210 + currentLevel * 15;
-        const pulseGrad = ctx.createRadialGradient(
-          W * 0.5, H * 0.5, Math.min(W, H) * 0.3,
-          W * 0.5, H * 0.5, Math.max(W, H) * 0.7
-        );
-        pulseGrad.addColorStop(0, `hsla(${levelPulseHue}, 70%, 70%, 0)`);
-        pulseGrad.addColorStop(0.6, `hsla(${levelPulseHue}, 70%, 65%, ${pulseAlpha * 0.15})`);
-        pulseGrad.addColorStop(1, `hsla(${levelPulseHue}, 80%, 75%, ${pulseAlpha})`);
-        ctx.fillStyle = pulseGrad;
-        ctx.fillRect(0, 0, W, H);
-      }
-    }
   }
 
   // ========================================================================
@@ -1570,6 +1368,12 @@
   //
   // Slider spec: [paramName, label, min, max, step, group]
   const TUNING_SPEC = [
+    // Scoring — the knobs that shape the game's difficulty curve
+    ['startVolume',       'start',     100, 1000, 10,   'Scoring'],
+    ['minVolume',         'min vol',   2,   30,   1,    'Scoring'],
+    ['maxVolume',         'max vol',   10,  100,  2,    'Scoring'],
+    ['targetCount',       'targets',   4,   30,   1,    'Scoring'],
+    ['microCount',        'micros',    100, 500,  10,   'Scoring'],
     // Movement — tilt response
     ['baseAccel',         'accel',     400, 2400, 20, 'Movement'],
     ['massAccelBoost',    'mass boost', 0.0, 1.5,  0.05, 'Movement'],
