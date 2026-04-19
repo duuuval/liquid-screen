@@ -405,7 +405,7 @@
     startVolume: 50.0,       // µL
     minVolume: 12,           // target drop min volume — keeps tiny drops visible
     maxVolume: 24,           // target drop max volume
-    targetCount: 10,         // on-screen static drops
+    targetCount: 16,         // on-screen static drops — denser at small scale for visual life
     // Visuals
     radiusPerUL: 1.25,       // px per µL — r = radiusPerUL * cbrt(volume) * tuningConstant — actually, we use area scaling (see deriveRadius)
     stretchMax: 0.28,        // max ellipse stretch factor at high speed (0.28 = 28% elongation)
@@ -415,6 +415,24 @@
     wobDamp: 6,              // damping — higher = less oscillation, more dead
     wobImpulseScale: 0.012,  // how much velocity change feeds into wobble velocity
     wobMaxAmp: 0.35,         // clamp — prevents visual explosion on huge impulses
+    // Target physics — static drops now respond to tilt with their own
+    // surface-tension-plus-inertia model. Heavier drops are "stickier"
+    // (higher stick threshold via volume). Drops that touch each other
+    // merge. Drops that leave the buffer get respawned ("new raindrop").
+    //
+    // Tilt force on a target = player's tilt accel × targetTiltScale × mass^(-targetAccelMassExp)
+    // (negative exp means bigger drops feel LESS push — surface tension
+    //  holds them harder). Combined with stick threshold below.
+    targetTiltScale: 0.35,   // 0 = static (old behavior), 1 = moves as freely as player
+    targetAccelMassExp: 0.4, // how much mass reduces a target's responsiveness. 0 = all equal.
+    // Stick threshold — below this tilt magnitude (normalized 0-1), a
+    // slow-moving target stays stuck. Scales with target volume so bigger
+    // drops need more tilt to un-stick.
+    targetStickTilt: 0.20,   // base stick threshold at min-volume drop
+    targetStickTiltMassExp: 0.5,  // how much volume raises the threshold
+    targetStickVel: 8,       // below this px/s, a target can re-stick
+    // Target friction — higher than player (more drag, for surface tension)
+    targetFriction: 0.93,    // per-frame velocity multiplier at 60fps
     // Mass-scaled friction — the core of the balance-game design.
     // Bigger drops coast longer after tilt release, making overcorrection
     // inevitable at size. The game becomes "manage your own momentum."
@@ -521,6 +539,7 @@
     );
     targets.push({
       x, y, volume: vol, r,
+      vx: 0, vy: 0,                    // for target physics
       spawnT: performance.now(),       // for splat-in animation
       sig: makeShapeSig(TARGET_SHAPE_AMP),
     });
@@ -698,6 +717,104 @@
         trueScore = player.volume;
         targets.splice(i, 1);
         spawnTarget(true);
+      }
+    }
+
+    // Target physics — each drop is now a mini physics object. Tilt pushes
+    // them (but less than the player), friction holds them back, and a
+    // stick threshold below which they don't move at all. Surface-tension
+    // analogy: big drops resist motion more than small ones.
+    const tiltMag = Math.hypot(nx, ny);
+    const targetBuf = TUNE.edgeBuffer;   // reuse player's buffer for "gone" detection
+    for (let i = targets.length - 1; i >= 0; i--) {
+      const t = targets[i];
+
+      // Per-target stick threshold — scales up with target volume.
+      const tMassRatio = t.volume / TUNE.minVolume;  // 1.0 at smallest, grows from there
+      const stickThresh = TUNE.targetStickTilt *
+                          Math.pow(tMassRatio, TUNE.targetStickTiltMassExp);
+
+      // Decide if this target should receive tilt force.
+      // Condition: either already moving (inertia keeps it going) OR tilt
+      // exceeds its surface-tension stick threshold.
+      const moving = (Math.abs(t.vx) + Math.abs(t.vy)) > TUNE.targetStickVel;
+      const unstuck = moving || tiltMag > stickThresh;
+
+      if (unstuck) {
+        // Apply tilt acceleration, scaled down from player's and softened
+        // by target's mass (bigger targets less responsive).
+        const tAccelScale = TUNE.targetTiltScale *
+                            Math.pow(tMassRatio, -TUNE.targetAccelMassExp);
+        t.vx += nx * TUNE.baseAccel * tAccelScale * dt;
+        t.vy += ny * TUNE.baseAccel * tAccelScale * dt;
+
+        // Friction — targets have more drag than player (surface tension)
+        const tFric = Math.pow(TUNE.targetFriction, dt * 60);
+        t.vx *= tFric;
+        t.vy *= tFric;
+
+        t.x += t.vx * dt;
+        t.y += t.vy * dt;
+
+        // Re-stick if slowed enough AND tilt is below threshold.
+        if (!moving && tiltMag <= stickThresh) {
+          // (The condition above lets this branch trigger after a drop
+          // has decelerated below targetStickVel while tilt is low.)
+          t.vx = 0;
+          t.vy = 0;
+        }
+      } else {
+        // Fully stuck — ensure velocity is truly zero to prevent drift.
+        t.vx = 0;
+        t.vy = 0;
+      }
+
+      // Respawn if the target has drifted past the buffer — "the old drop
+      // ran off the screen, a new one landed somewhere else."
+      if (t.x < -targetBuf || t.x > W + targetBuf ||
+          t.y < -targetBuf || t.y > H + targetBuf) {
+        targets.splice(i, 1);
+        spawnTarget(true);
+      }
+    }
+
+    // Target-target merging — when two drops touch, they coalesce. The
+    // heavier drop absorbs the lighter one at a momentum-conserving
+    // position, then inherits a combined velocity. Iterate backwards so
+    // splicing doesn't invalidate indices.
+    for (let i = targets.length - 1; i >= 0; i--) {
+      const a = targets[i];
+      if (!a) continue;
+      for (let j = i - 1; j >= 0; j--) {
+        const b = targets[j];
+        if (!b) continue;
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        const d = Math.hypot(dx, dy);
+        // Merge when center distance is less than ~70% of summed radii —
+        // same threshold style as player absorb, feels like "they ran into
+        // each other and became one."
+        if (d < (a.r + b.r) * 0.7) {
+          // Pick the bigger drop as the survivor (b is lower index; could
+          // be either). Merge a into b (or vice versa based on mass).
+          const keeper = a.volume >= b.volume ? a : b;
+          const absorbed = a.volume >= b.volume ? b : a;
+          // Momentum-conserving merge
+          const totalVol = keeper.volume + absorbed.volume;
+          keeper.x = (keeper.x * keeper.volume + absorbed.x * absorbed.volume) / totalVol;
+          keeper.y = (keeper.y * keeper.volume + absorbed.y * absorbed.volume) / totalVol;
+          keeper.vx = (keeper.vx * keeper.volume + absorbed.vx * absorbed.volume) / totalVol;
+          keeper.vy = (keeper.vy * keeper.volume + absorbed.vy * absorbed.volume) / totalVol;
+          keeper.volume = totalVol;
+          keeper.r = deriveRadius(totalVol);
+          // Remove the absorbed one. Spawn a new drop to maintain density.
+          const absorbedIdx = (absorbed === a) ? i : j;
+          targets.splice(absorbedIdx, 1);
+          spawnTarget(true);
+          // After splicing, current a/b indices are unreliable; break out
+          // and let next outer-loop iteration handle further merges.
+          break;
+        }
       }
     }
 
@@ -1061,6 +1178,10 @@
     ['massAccelBoost',    'mass boost', 0.0, 1.5,  0.05, 'Movement'],
     ['friction',          'friction',  0.95, 1.00, 0.002, 'Movement'],
     ['frictionMassExp',   'fric mass', 0.0, 1.5,  0.05, 'Movement'],
+    // Targets — other drops' own physics
+    ['targetTiltScale',   'tgt push',  0.0, 1.0,  0.05, 'Targets'],
+    ['targetStickTilt',   'tgt stick', 0.0, 1.0,  0.02, 'Targets'],
+    ['targetFriction',    'tgt fric',  0.85, 1.00, 0.01, 'Targets'],
     // Edges — game-over boundary behavior
     ['edgeBuffer',        'buffer',    0,   300,  10,   'Edges'],
     // Wobble — jiggle on braking
