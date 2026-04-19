@@ -586,13 +586,23 @@
   // Time
   let lastT = performance.now();
 
-  // World bounds (in world-space coordinates) — as zoom decreases, the
-  // visible world expands. Spawning uses these so drops fill the whole
-  // visible area, not just the original screen rectangle.
-  function worldW() { return W / zoomFactor; }
-  function worldH() { return H / zoomFactor; }
-  function worldCenterX() { return worldW() / 2; }
-  function worldCenterY() { return worldH() / 2; }
+  // World bounds (in world-space coordinates). The visible rectangle is
+  // the inverse of the render transform: whatever world region maps to
+  // [0,W] x [0,H] on screen. Since rendering is
+  //   screenX = anchorScreenX + (worldX - anchorWorldX) * zoom
+  // the visible world bounds are anchor-centered, not origin-anchored:
+  //   worldMinX = anchorWorldX - anchorScreenX / zoom
+  //   worldMaxX = anchorWorldX + (W - anchorScreenX) / zoom
+  // At zoom=1 with anchor at screen center this degenerates to [0,W]×[0,H],
+  // matching the pre-zoom starting state.
+  function worldMinX() { return zoomAnchorWorldX - zoomAnchorScreenX / zoomFactor; }
+  function worldMaxX() { return zoomAnchorWorldX + (W - zoomAnchorScreenX) / zoomFactor; }
+  function worldMinY() { return zoomAnchorWorldY - zoomAnchorScreenY / zoomFactor; }
+  function worldMaxY() { return zoomAnchorWorldY + (H - zoomAnchorScreenY) / zoomFactor; }
+  function worldW() { return worldMaxX() - worldMinX(); }
+  function worldH() { return worldMaxY() - worldMinY(); }
+  function worldCenterX() { return (worldMinX() + worldMaxX()) / 2; }
+  function worldCenterY() { return (worldMinY() + worldMaxY()) / 2; }
 
   // Target count scales with visible area so density stays constant.
   function effectiveTargetCount() {
@@ -616,11 +626,11 @@
     let x, y, tries = 0;
     const vol = randomTargetVolume();
     const r = deriveRadius(vol);
-    const ww = worldW();
-    const wh = worldH();
+    const minX = worldMinX(), maxX = worldMaxX();
+    const minY = worldMinY(), maxY = worldMaxY();
     do {
-      x = margin + Math.random() * (ww - 2 * margin);
-      y = margin + Math.random() * (wh - 2 * margin);
+      x = minX + margin + Math.random() * (maxX - minX - 2 * margin);
+      y = minY + margin + Math.random() * (maxY - minY - 2 * margin);
       tries++;
       if (tries > 20) break;
     } while (
@@ -641,8 +651,10 @@
   // a random radius in the tiny range and no game-relevant state.
   function seedMicroDrops() {
     microDrops.length = 0;
+    const minX = worldMinX(), rangeX = worldMaxX() - minX;
+    const minY = worldMinY(), rangeY = worldMaxY() - minY;
     for (let i = 0; i < MICRO_COUNT; i++) {
-      microDrops.push(newMicroDrop(Math.random() * worldW(), Math.random() * worldH()));
+      microDrops.push(newMicroDrop(minX + Math.random() * rangeX, minY + Math.random() * rangeY));
     }
   }
 
@@ -825,9 +837,10 @@
     // edgeBuffer. At zoom 1 this is the screen edge; zoomed out, it's the
     // (larger) world edge. So the grace zone scales with the playfield.
     const buf = TUNE.edgeBuffer;
-    const ww = worldW(), wh = worldH();
-    if (player.x < -buf || player.x > ww + buf ||
-        player.y < -buf || player.y > wh + buf) {
+    const minX = worldMinX(), maxX = worldMaxX();
+    const minY = worldMinY(), maxY = worldMaxY();
+    if (player.x < minX - buf || player.x > maxX + buf ||
+        player.y < minY - buf || player.y > maxY + buf) {
       triggerGameOver();
       return;
     }
@@ -911,9 +924,10 @@
 
       // Respawn if the target has drifted past the buffer — "the old drop
       // ran off the screen, a new one landed somewhere else."
-      const wwT = worldW(), whT = worldH();
-      if (t.x < -targetBuf || t.x > wwT + targetBuf ||
-          t.y < -targetBuf || t.y > whT + targetBuf) {
+      const tMinX = worldMinX(), tMaxX = worldMaxX();
+      const tMinY = worldMinY(), tMaxY = worldMaxY();
+      if (t.x < tMinX - targetBuf || t.x > tMaxX + targetBuf ||
+          t.y < tMinY - targetBuf || t.y > tMaxY + targetBuf) {
         targets.splice(i, 1);
         spawnTarget(true);
       }
@@ -1005,11 +1019,13 @@
           m.respawnAt = 0;
           m.x += (Math.random() - 0.5) * 30;
           m.y += (Math.random() - 0.5) * 30;
-          const ww = worldW(), wh = worldH();
-          if (m.x < 0) m.x += ww;
-          if (m.x > ww) m.x -= ww;
-          if (m.y < 0) m.y += wh;
-          if (m.y > wh) m.y -= wh;
+          const mMinX = worldMinX(), mMaxX = worldMaxX();
+          const mMinY = worldMinY(), mMaxY = worldMaxY();
+          const mw = mMaxX - mMinX, mh = mMaxY - mMinY;
+          if (m.x < mMinX) m.x += mw;
+          if (m.x > mMaxX) m.x -= mw;
+          if (m.y < mMinY) m.y += mh;
+          if (m.y > mMaxY) m.y -= mh;
           m.r = MICRO_MIN_R + Math.random() * (MICRO_MAX_R - MICRO_MIN_R);
           m.vol = MICRO_MIN_VOL + Math.random() * (MICRO_MAX_VOL - MICRO_MIN_VOL);
         }
@@ -1029,8 +1045,10 @@
         const idx = (start + k) % microDrops.length;
         const m = microDrops[idx];
         if (m.clearedAt !== 0) {
-          m.x = Math.random() * worldW();
-          m.y = Math.random() * worldH();
+          const sMinX = worldMinX(), sRangeX = worldMaxX() - sMinX;
+          const sMinY = worldMinY(), sRangeY = worldMaxY() - sMinY;
+          m.x = sMinX + Math.random() * sRangeX;
+          m.y = sMinY + Math.random() * sRangeY;
           m.r = MICRO_MIN_R + Math.random() * (MICRO_MAX_R - MICRO_MIN_R);
           m.vol = MICRO_MIN_VOL + Math.random() * (MICRO_MAX_VOL - MICRO_MIN_VOL);
           m.clearedAt = 0;
@@ -1100,14 +1118,24 @@
     bgLigMulStart = bgLigMulCurrent;
     bgLigMulTarget = def.bgLigMul;
     transitionStart = performance.now();
-    // Grow the field to match new world area — more drops fill the
-    // expanded playfield so density stays roughly constant.
+    // PRE-POPULATE the full post-zoom world BEFORE the tween starts. The
+    // fiction: "it's been raining out there too." Without this, the zoom-out
+    // reveals empty periphery that fills in slowly via normal respawn — and
+    // the trail the player leaves behind competes with that fill, so the
+    // middle stays bare. Solution: temporarily set zoomFactor to the target
+    // so spawn bounds + count functions compute against the FINAL world
+    // size, populate, then restore. The tween starts from full.
+    const savedZoom = zoomFactor;
+    zoomFactor = zoomFactorTarget;
     const targetNeeded = effectiveTargetCount();
     while (targets.length < targetNeeded) spawnTarget(true);
     const microNeeded = effectiveMicroCount();
+    const minX = worldMinX(), rangeX = worldMaxX() - minX;
+    const minY = worldMinY(), rangeY = worldMaxY() - minY;
     while (microDrops.length < microNeeded) {
-      microDrops.push(newMicroDrop(Math.random() * worldW(), Math.random() * worldH()));
+      microDrops.push(newMicroDrop(minX + Math.random() * rangeX, minY + Math.random() * rangeY));
     }
+    zoomFactor = savedZoom;
   }
 
   const scoreEl = document.getElementById('score');
@@ -1327,20 +1355,46 @@
     const path = buildDropPath(r, sig, stretch, stretchAngle, wobbleX, wobbleY);
 
     // --- 2. Refraction. Clip to drop shape, blit background magnified/shifted.
+    //
+    // The clip path was built in drop-local coords under the active zoom
+    // transform, so it's now a screen-space region where the drop is visible.
+    // Clips persist across setTransform changes in canvas 2D, so we can drop
+    // to identity-ish (DPR-only) transform for the drawImage, do the math
+    // in screen space where it's simple, then restore. This keeps the
+    // refraction sampling at a consistent MAG× magnification regardless of
+    // world zoom — fixing the "magnifying glass" hard-edge that appeared at
+    // non-1.0 zoom levels.
     ctx.save();
     ctx.clip(path);
 
+    // Drop center's actual screen position (accounting for zoom transform).
+    const screenCx = zoomAnchorScreenX + (cx - zoomAnchorWorldX) * zoomFactor;
+    const screenCy = zoomAnchorScreenY + (cy - zoomAnchorWorldY) * zoomFactor;
+    // Drop's apparent on-screen radius (what the user actually sees).
+    const rScreen = r * zoomFactor;
+
+    // Swap out of the zoom transform for the bg blit. setTransform resets
+    // the matrix entirely; we set it to the base DPR transform that the
+    // main canvas was initialized with. The clip (baked into screen space
+    // at this point) still applies.
+    ctx.save();
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
     const MAG = 1.20;
-    // Offset the sample toward screen center — edge drops warp more.
-    const ncx = cx / W - 0.5;
-    const ncy = cy / H - 0.5;
-    const offX = -ncx * r * 0.55;
-    const offY = -ncy * r * 0.55;
+    // Edge-parallax: drops farther from screen center warp the background more.
+    const ncx = screenCx / W - 0.5;
+    const ncy = screenCy / H - 0.5;
+    const offX = -ncx * rScreen * 0.55;
+    const offY = -ncy * rScreen * 0.55;
+    // Pure screen-space math, same as pre-zoom: magnify bg by MAG, anchor so
+    // the drop center samples the drop's screen position.
     const drawW = W * MAG;
     const drawH = H * MAG;
-    const dx = -cx * MAG + offX;
-    const dy = -cy * MAG + offY;
+    const dx = -screenCx * MAG + screenCx + offX;
+    const dy = -screenCy * MAG + screenCy + offY;
     ctx.drawImage(bgCanvas, dx, dy, drawW, drawH);
+
+    ctx.restore(); // restore zoom transform
 
     // --- 3. Body tint — uniform radial darkening toward silhouette.
     //        This is genuine optics: a transparent dome looks darker at its
