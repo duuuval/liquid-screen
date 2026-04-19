@@ -395,7 +395,9 @@
   const TUNE = {
     // Physics
     baseAccel: 1200,         // px/s^2 at full tilt, at starting mass
-    massAccelExp: 0.45,      // how much bigger = slower to accelerate. 0 = no effect, 1 = linear. 0.45 feels "heavy but not stuck"
+    massAccelBoost: 0.50,    // bigger = harder to control. accel = base × mass^boost.
+                             // 0 = constant accel. 0.5 = 4x mass has 2x accel.
+                             // This is the engine of "growing makes you dangerous."
     friction: 0.985,         // per-frame velocity multiplier at 60fps (tiny amount of drag so full-release slows eventually)
     tiltMaxDeg: 35,          // beyond this tilt, you're already at max accel — don't require wrist-breaking angles
     tiltDeadzone: 1.5,       // degrees — ignore tiny jitter when phone is "flat"
@@ -605,9 +607,12 @@
 
     const { nx, ny } = currentTilt();
 
-    // Mass-scaled acceleration. Bigger droplets accelerate slower.
+    // Mass-scaled acceleration. Bigger droplets accelerate HARDER — the
+    // force amplifies with mass, making tilts at size into genuine commitments.
+    // Paired with mass-scaled friction below, this creates the "can't stop
+    // once moving" loop that is the core of the balance-game design.
     const massRatio = player.volume / TUNE.startVolume;
-    const accelScale = Math.pow(massRatio, -TUNE.massAccelExp);
+    const accelScale = Math.pow(massRatio, TUNE.massAccelBoost);
     const ax = nx * TUNE.baseAccel * accelScale;
     const ay = ny * TUNE.baseAccel * accelScale;
 
@@ -1047,7 +1052,7 @@
   const TUNING_SPEC = [
     // Movement — tilt response
     ['baseAccel',         'accel',     400, 2400, 20, 'Movement'],
-    ['massAccelExp',      'mass slow', 0.0, 1.0,  0.05, 'Movement'],
+    ['massAccelBoost',    'mass boost', 0.0, 1.5,  0.05, 'Movement'],
     ['friction',          'friction',  0.95, 1.00, 0.002, 'Movement'],
     ['frictionMassExp',   'fric mass', 0.0, 1.5,  0.05, 'Movement'],
     // Edges — game-over boundary behavior
@@ -1281,6 +1286,11 @@
 
   startBtn.addEventListener('click', beginPlay);
   replayBtn.addEventListener('click', () => {
+    // Re-acquire fullscreen + portrait lock on replay. Fullscreen may have
+    // been dropped between runs (tab switch, notification pull, etc.), which
+    // also releases the orientation lock. Calling this from a user-gesture
+    // handler is our only chance to restore both.
+    enterFullscreenAndLock();
     // Re-calibrate on replay too — player may be holding phone differently
     calBeta = rawBeta;
     calGamma = rawGamma;
