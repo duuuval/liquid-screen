@@ -515,16 +515,28 @@
   // Static target drops
   const targets = []; // { x, y, volume, r, spawnT, sig }
 
-  // Micro drops — atmospheric scenery. Tiny static drops filling the space
-  // between game objects so the screen actually looks rained-on. Each has
-  // {x, y, r, clearedAt}. If clearedAt is set, the drop is invisible until
-  // respawn. Not gameplay — zero volume impact when player passes through.
-  const MICRO_COUNT = 70;
-  const MICRO_MIN_R = 1.8;
-  const MICRO_MAX_R = 3.8;
-  const MICRO_RESPAWN_MS = 3000;   // base respawn delay after being cleared
-  const MICRO_RESPAWN_JITTER = 2000; // +0..this random added per drop
+  // Micro drops — atmospheric scenery. Tiny water beads filling the space
+  // between game objects so the screen actually looks rained-on.
+  //   MICRO_COUNT: target density. High enough to read as "rain on screen"
+  //   MICRO_MIN/MAX_R: size range in pixels
+  //   MICRO_RESPAWN_MS: base delay before a cleared drop comes back
+  //   MICRO_SPRINKLE_PER_SEC: extra "fresh rain" landings per sec regardless
+  //                           of clears — creates the "still raining" feel
+  //   MICRO_MIN/MAX_VOL: µL transferred to the clearer when absorbed.
+  //                     Small enough that steady-state growth is slow, but
+  //                     meaningful — reinforces the "rain soaks you" idea.
+  //   MICRO_ALPHA: render opacity — keeps micros subtle vs game drops
+  const MICRO_COUNT = 350;
+  const MICRO_MIN_R = 1.6;
+  const MICRO_MAX_R = 3.2;
+  const MICRO_RESPAWN_MS = 3000;
+  const MICRO_RESPAWN_JITTER = 2000;
+  const MICRO_SPRINKLE_PER_SEC = 8;
+  const MICRO_MIN_VOL = 0.15;
+  const MICRO_MAX_VOL = 0.6;
+  const MICRO_ALPHA = 0.55;
   const microDrops = [];
+  let microSprinkleAccum = 0;   // fractional accumulator for sprinkle spawns
 
   // Score
   let displayedScore = TUNE.startVolume;  // what's shown, chases trueScore
@@ -569,14 +581,19 @@
   function seedMicroDrops() {
     microDrops.length = 0;
     for (let i = 0; i < MICRO_COUNT; i++) {
-      microDrops.push({
-        x: Math.random() * W,
-        y: Math.random() * H,
-        r: MICRO_MIN_R + Math.random() * (MICRO_MAX_R - MICRO_MIN_R),
-        clearedAt: 0,                  // 0 means visible; timestamp means cleared
-        respawnAt: 0,                  // when to reappear after clearing
-      });
+      microDrops.push(newMicroDrop(Math.random() * W, Math.random() * H));
     }
+  }
+
+  function newMicroDrop(x, y) {
+    return {
+      x, y,
+      r: MICRO_MIN_R + Math.random() * (MICRO_MAX_R - MICRO_MIN_R),
+      vol: MICRO_MIN_VOL + Math.random() * (MICRO_MAX_VOL - MICRO_MIN_VOL),
+      clearedAt: 0,
+      respawnAt: 0,
+      sig: makeShapeSig(0.10),
+    };
   }
 
   function resetGame() {
@@ -864,42 +881,82 @@
       }
     }
 
-    // Micro drops — update trail/respawn state. No physics, just clearing
-    // detection against the player and timed respawns.
+    // Micro drops — clearing detection (from player + moving targets),
+    // volume transfer to the player on clear, timed respawn, and a
+    // continuous sprinkle that makes it feel like it's still raining.
     const nowMs = performance.now();
-    // Small buffer past the player's radius — clear a bit ahead of the
-    // actual edge so the trail looks like "wet path" rather than
-    // "laser-precise cutout."
-    const clearR = player.r + 4;
-    const clearR2 = clearR * clearR;
+    // Clearers = player + targets. Any drop close to any of these gets
+    // absorbed. Only the player gains volume from it (targets consume
+    // visually but don't grow — would create runaway mass otherwise).
+    const clearers = [player, ...targets];
+
     for (const m of microDrops) {
       if (m.clearedAt === 0) {
-        // Visible — check if player is overlapping.
-        const dx = m.x - player.x;
-        const dy = m.y - player.y;
-        if (dx * dx + dy * dy < clearR2) {
-          m.clearedAt = nowMs;
-          m.respawnAt = nowMs + MICRO_RESPAWN_MS + Math.random() * MICRO_RESPAWN_JITTER;
+        // Visible — check overlap with any clearer.
+        for (let c = 0; c < clearers.length; c++) {
+          const clearer = clearers[c];
+          const dx = m.x - clearer.x;
+          const dy = m.y - clearer.y;
+          const cR = clearer.r + 4;
+          if (dx * dx + dy * dy < cR * cR) {
+            m.clearedAt = nowMs;
+            m.respawnAt = nowMs + MICRO_RESPAWN_MS + Math.random() * MICRO_RESPAWN_JITTER;
+            // Only the player gains volume (clearer at index 0 is player).
+            if (c === 0) {
+              player.volume += m.vol;
+              player.r = deriveRadius(player.volume);
+              trueScore = player.volume;
+            }
+            break;
+          }
         }
       } else if (nowMs >= m.respawnAt) {
-        // Respawn — but only if player isn't currently sitting on this spot.
-        // (Otherwise drop would flash in and immediately clear again.)
-        const dx = m.x - player.x;
-        const dy = m.y - player.y;
-        if (dx * dx + dy * dy > clearR2) {
+        // Ready to respawn — skip if a clearer is still on this spot.
+        let blocked = false;
+        for (const clearer of clearers) {
+          const dx = m.x - clearer.x;
+          const dy = m.y - clearer.y;
+          const cR = clearer.r + 4;
+          if (dx * dx + dy * dy < cR * cR) {
+            blocked = true;
+            break;
+          }
+        }
+        if (!blocked) {
           m.clearedAt = 0;
           m.respawnAt = 0;
-          // Refresh position slightly — creates the feeling of "new rain
-          // landed here" rather than "same drop popped back into place."
-          // Keep near original position so visual density stays even.
           m.x += (Math.random() - 0.5) * 30;
           m.y += (Math.random() - 0.5) * 30;
-          // Clamp to screen
           if (m.x < 0) m.x += W;
           if (m.x > W) m.x -= W;
           if (m.y < 0) m.y += H;
           if (m.y > H) m.y -= H;
           m.r = MICRO_MIN_R + Math.random() * (MICRO_MAX_R - MICRO_MIN_R);
+          m.vol = MICRO_MIN_VOL + Math.random() * (MICRO_MAX_VOL - MICRO_MIN_VOL);
+        }
+      }
+    }
+
+    // Continuous sprinkle — fresh rain at a steady rate, regardless of
+    // clears. Creates the "still raining" feel even when standing still.
+    // Implemented by pulling a cleared drop from the pool and reactivating
+    // it at a fresh location. If no cleared drops exist, nothing spawns
+    // (the field is naturally capped at MICRO_COUNT).
+    microSprinkleAccum += dt * MICRO_SPRINKLE_PER_SEC;
+    while (microSprinkleAccum >= 1) {
+      microSprinkleAccum -= 1;
+      const start = Math.floor(Math.random() * microDrops.length);
+      for (let k = 0; k < microDrops.length; k++) {
+        const idx = (start + k) % microDrops.length;
+        const m = microDrops[idx];
+        if (m.clearedAt !== 0) {
+          m.x = Math.random() * W;
+          m.y = Math.random() * H;
+          m.r = MICRO_MIN_R + Math.random() * (MICRO_MAX_R - MICRO_MIN_R);
+          m.vol = MICRO_MIN_VOL + Math.random() * (MICRO_MAX_VOL - MICRO_MIN_VOL);
+          m.clearedAt = 0;
+          m.respawnAt = 0;
+          break;
         }
       }
     }
@@ -1198,22 +1255,17 @@
     // Before resetGame() runs, player.sig is null and targets is empty.
     if (state === STATE.READY) return;
 
-    // 2b. Micro drops — atmospheric layer. Tiny, cheap to render. Drawn
-    // before game drops so player/targets always appear on top. Skipped
-    // when cleared (trail behavior). A tiny fade-in if recently respawned.
+    // 2b. Micro drops — atmospheric layer. Rendered using the same
+    // drawDroplet() path as game drops for visual consistency (refraction,
+    // rim, pinpoint specular), just at tiny radius and with reduced alpha
+    // so they read as "background wetness" rather than game elements.
+    ctx.save();
+    ctx.globalAlpha = MICRO_ALPHA;
     for (const m of microDrops) {
       if (m.clearedAt !== 0) continue;
-      // Dark circle body
-      ctx.fillStyle = 'rgba(5, 12, 28, 0.75)';
-      ctx.beginPath();
-      ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
-      ctx.fill();
-      // Tiny bright highlight — one pixel, upper-left quadrant
-      ctx.fillStyle = 'rgba(220, 235, 255, 0.7)';
-      ctx.beginPath();
-      ctx.arc(m.x - m.r * 0.3, m.y - m.r * 0.3, Math.max(0.6, m.r * 0.28), 0, Math.PI * 2);
-      ctx.fill();
+      drawDroplet(m.x, m.y, m.r, 0, 0, 0, 0, m.sig, 1);
     }
+    ctx.restore();
 
     // 3. Draw targets with splat-in animation. Static drops have no stretch
     //    and no wobble — they're at rest.
